@@ -1,0 +1,93 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Persistent user data",
+      "type": "object",
+      "properties": {
+        "displayName": { "type": "string" },
+        "coins": { "type": "number" },
+        "ownedSkins": { "type": "array", "items": { "type": "string" } },
+        "equippedSkin": { "type": "string" },
+        "highScore": { "type": "number" },
+        "lastActive": { "type": "number" }
+      },
+      "required": ["displayName", "coins"]
+    },
+    "PlayerSession": {
+      "title": "PlayerSession",
+      "description": "Active player state in the arena",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "segments": { "type": "array", "items": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } } },
+        "angle": { "type": "number" },
+        "wager": { "type": "number" },
+        "isAlive": { "type": "boolean" },
+        "lastUpdate": { "type": "number" },
+        "color1": { "type": "string" },
+        "color2": { "type": "string" }
+      },
+      "required": ["userId", "segments", "angle", "wager", "isAlive"]
+    },
+    "Food": {
+      "title": "Food",
+      "description": "Food items in the arena",
+      "type": "object",
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "value": { "type": "number" },
+        "type": { "type": "string", "enum": ["normal", "gold", "speed", "star", "dropped"] },
+        "color": { "type": "string" }
+      },
+      "required": ["x", "y", "value", "type"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Chat messages in the arena",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "text": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["userId", "displayName", "text", "timestamp"]
+    },
+    "KillEvent": {
+      "title": "KillEvent",
+      "description": "Events when a player kills another",
+      "type": "object",
+      "properties": {
+        "killerName": { "type": "string" },
+        "victimName": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["killerName", "victimName", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/arenaPlayers/{playerId}": {
+      "schema": "PlayerSession",
+      "description": "Active players in the arena"
+    },
+    "/arenaFood/{foodId}": {
+      "schema": "Food",
+      "description": "Food items in the arena"
+    },
+    "/arenaChat/{chatId}": {
+      "schema": "ChatMessage",
+      "description": "Chat messages in the arena"
+    },
+    "/arenaKills/{killId}": {
+      "schema": "KillEvent",
+      "description": "Kill events in the arena"
+    }
+  }
+}

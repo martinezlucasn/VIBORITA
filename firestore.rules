@@ -1,0 +1,156 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: {userId}
+// Fields:
+//   - displayName: string (required)
+//   - coins: number (required)
+//   - ownedSkins: list of strings (optional)
+//   - equippedSkin: string (optional)
+//   - highScore: number (optional)
+//   - lastActive: number (optional)
+//
+// Collection: arenaPlayers
+// Document ID: {playerId}
+// Fields:
+//   - userId: string (required)
+//   - displayName: string (required)
+//   - segments: list of maps {x: number, y: number} (required)
+//   - angle: number (required)
+//   - wager: number (required)
+//   - isAlive: boolean (required)
+//   - lastUpdate: number (required)
+//   - color1: string (optional)
+//   - color2: string (optional)
+//
+// Collection: arenaFood
+// Document ID: {foodId}
+// Fields:
+//   - x: number (required)
+//   - y: number (required)
+//   - value: number (required)
+//   - type: string (required, ['normal', 'gold', 'speed', 'star', 'dropped'])
+//   - color: string (optional)
+//
+// Collection: arenaChat
+// Document ID: {chatId}
+// Fields:
+//   - userId: string (required)
+//   - displayName: string (required)
+//   - text: string (required)
+//   - timestamp: number (required)
+//
+// Collection: arenaKills
+// Document ID: {killId}
+// Fields:
+//   - killerName: string (required)
+//   - victimName: string (required)
+//   - timestamp: number (required)
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "martinezlucasn@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['displayName', 'coins', 'lastActive']) &&
+             data.displayName is string &&
+             data.coins is number &&
+             data.coins >= 0 &&
+             data.lastActive is number;
+    }
+
+    function isValidPlayer(data) {
+      return data.keys().hasAll(['userId', 'segments', 'angle', 'wager', 'isAlive', 'lastUpdate']) &&
+             data.userId is string &&
+             data.segments is list &&
+             data.angle is number &&
+             data.wager is number &&
+             data.isAlive is bool &&
+             data.lastUpdate is number;
+    }
+
+    function isValidFood(data) {
+      return data.keys().hasAll(['x', 'y', 'value', 'type']) &&
+             data.x is number &&
+             data.y is number &&
+             data.value is number &&
+             data.type in ['normal', 'gold', 'speed', 'star', 'dropped'];
+    }
+
+    function isValidChat(data) {
+      return data.keys().hasAll(['userId', 'displayName', 'text', 'timestamp']) &&
+             data.userId is string &&
+             data.displayName is string &&
+             data.text is string &&
+             data.text.size() > 0 &&
+             data.text.size() < 200 &&
+             data.timestamp is number;
+    }
+
+    function isValidKill(data) {
+      return data.keys().hasAll(['killerName', 'victimName', 'timestamp']) &&
+             data.killerName is string &&
+             data.victimName is string &&
+             data.timestamp is number;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /arenaPlayers/{playerId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidPlayer(request.resource.data) && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && isValidPlayer(request.resource.data) && (resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    match /arenaFood/{foodId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidFood(request.resource.data);
+      allow update: if isAuthenticated() && isValidFood(request.resource.data);
+      allow delete: if isAuthenticated();
+    }
+
+    match /arenaChat/{chatId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidChat(request.resource.data) && request.resource.data.userId == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    match /arenaKills/{killId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidKill(request.resource.data);
+      allow delete: if isAdmin();
+    }
+  }
+}
