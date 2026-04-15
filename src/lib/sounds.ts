@@ -2,7 +2,7 @@ import { Howl } from 'howler';
 
 const SOUNDS = {
   food: 'https://assets.mixkit.co/active_storage/sfx/2571/2571-preview.mp3',
-  goldFood: 'https://assets.mixkit.co/active_storage/sfx/1834/1834-preview.mp3',
+  goldFood: 'https://assets.mixkit.co/active_storage/sfx/2017/2017-preview.mp3',
   death: 'https://assets.mixkit.co/active_storage/sfx/2578/2578-preview.mp3',
   boost: 'https://assets.mixkit.co/active_storage/sfx/2574/2574-preview.mp3',
   collect: 'https://assets.mixkit.co/active_storage/sfx/2021/2021-preview.mp3',
@@ -16,7 +16,7 @@ class SoundManager {
     Object.entries(SOUNDS).forEach(([key, url]) => {
       this.sounds[key] = new Howl({
         src: [url],
-        volume: key === 'goldFood' ? 0.3 : 0.5,
+        volume: key === 'goldFood' ? 0.2 : 0.5,
         preload: true,
       });
     });

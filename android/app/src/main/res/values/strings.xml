@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Viborita</string>
+    <string name="title_activity_main">Viborita</string>
+    <string name="package_name">com.viborita.app</string>
+    <string name="custom_url_scheme">com.viborita.app</string>
+</resources>

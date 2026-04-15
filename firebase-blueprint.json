@@ -7,12 +7,30 @@
       "properties": {
         "displayName": { "type": "string" },
         "coins": { "type": "number" },
+        "monedas": { "type": "number" },
         "ownedSkins": { "type": "array", "items": { "type": "string" } },
         "equippedSkin": { "type": "string" },
         "highScore": { "type": "number" },
-        "lastActive": { "type": "number" }
+        "highScoreMonedas": { "type": "number" },
+        "lastActive": { "type": "number" },
+        "proAccessUntil": { "type": "number" },
+        "millonarioAccessUntil": { "type": "number" }
       },
       "required": ["displayName", "coins"]
+    },
+    "TicketPurchase": {
+      "title": "TicketPurchase",
+      "description": "Log of arena access ticket purchases",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string" },
+        "type": { "type": "string", "enum": ["pro", "millonario"] },
+        "price": { "type": "number" },
+        "expiry": { "type": "number" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["userId", "type", "price", "expiry", "timestamp"]
     },
     "PlayerSession": {
       "title": "PlayerSession",
@@ -26,10 +44,25 @@
         "wager": { "type": "number" },
         "isAlive": { "type": "boolean" },
         "lastUpdate": { "type": "number" },
+        "serverId": { "type": "string" },
         "color1": { "type": "string" },
-        "color2": { "type": "string" }
+        "color2": { "type": "string" },
+        "skinEmoji": { "type": "string" },
+        "isBoosting": { "type": "boolean" }
       },
-      "required": ["userId", "segments", "angle", "wager", "isAlive"]
+      "required": ["userId", "segments", "angle", "wager", "isAlive", "lastUpdate", "serverId"]
+    },
+    "WagerPlayer": {
+      "title": "WagerPlayer",
+      "description": "Presence tracking for wager arena servers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "serverId": { "type": "string" },
+        "isAlive": { "type": "boolean" },
+        "lastUpdate": { "type": "number" }
+      },
+      "required": ["id", "serverId", "isAlive", "lastUpdate"]
     },
     "Food": {
       "title": "Food",
@@ -40,9 +73,10 @@
         "y": { "type": "number" },
         "value": { "type": "number" },
         "type": { "type": "string", "enum": ["normal", "gold", "speed", "star", "dropped"] },
-        "color": { "type": "string" }
+        "color": { "type": "string" },
+        "serverId": { "type": "string" }
       },
-      "required": ["x", "y", "value", "type"]
+      "required": ["x", "y", "value", "type", "serverId"]
     },
     "ChatMessage": {
       "title": "ChatMessage",
@@ -52,9 +86,10 @@
         "userId": { "type": "string" },
         "displayName": { "type": "string" },
         "text": { "type": "string" },
-        "timestamp": { "type": "number" }
+        "timestamp": { "type": "number" },
+        "serverId": { "type": "string" }
       },
-      "required": ["userId", "displayName", "text", "timestamp"]
+      "required": ["userId", "displayName", "text", "timestamp", "serverId"]
     },
     "KillEvent": {
       "title": "KillEvent",
@@ -63,9 +98,24 @@
       "properties": {
         "killerName": { "type": "string" },
         "victimName": { "type": "string" },
-        "timestamp": { "type": "number" }
+        "timestamp": { "type": "number" },
+        "serverId": { "type": "string" }
       },
-      "required": ["killerName", "victimName", "timestamp"]
+      "required": ["killerName", "victimName", "timestamp", "serverId"]
+    },
+    "WagerCoin": {
+      "title": "WagerCoin",
+      "description": "Coins dropped in the wager arena",
+      "type": "object",
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "value": { "type": "number" },
+        "serverId": { "type": "string" },
+        "expiresAt": { "type": "number" },
+        "color": { "type": "string" }
+      },
+      "required": ["x", "y", "value", "serverId", "expiresAt"]
     }
   },
   "firestore": {
@@ -77,9 +127,17 @@
       "schema": "PlayerSession",
       "description": "Active players in the arena"
     },
+    "/wagerPlayers/{playerId}": {
+      "schema": "WagerPlayer",
+      "description": "Presence tracking for wager arena"
+    },
     "/arenaFood/{foodId}": {
       "schema": "Food",
       "description": "Food items in the arena"
+    },
+    "/wagerCoins/{coinId}": {
+      "schema": "WagerCoin",
+      "description": "Dropped coins in the wager arena"
     },
     "/arenaChat/{chatId}": {
       "schema": "ChatMessage",
@@ -88,6 +146,10 @@
     "/arenaKills/{killId}": {
       "schema": "KillEvent",
       "description": "Kill events in the arena"
+    },
+    "/ticketPurchases/{purchaseId}": {
+      "schema": "TicketPurchase",
+      "description": "Log of ticket purchases"
     }
   }
 }

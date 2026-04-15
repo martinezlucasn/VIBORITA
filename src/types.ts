@@ -6,11 +6,16 @@ export interface Point {
 export interface User {
   id: string;
   displayName: string;
+  email: string;
   coins: number;
+  monedas: number;
   ownedSkins: string[];
   equippedSkin: string;
   highScore: number;
+  highScoreMonedas: number;
   lastActive: number;
+  proAccessUntil?: number;
+  millonarioAccessUntil?: number;
 }
 
 export interface PlayerSession {
@@ -22,8 +27,14 @@ export interface PlayerSession {
   wager: number;
   isAlive: boolean;
   lastUpdate: number;
+  spawnTime?: number;
   color1: string;
   color2: string;
+  skinEmoji?: string;
+  isBoosting?: boolean;
+  hasAura?: boolean;
+  auraType?: 'fire' | 'ice';
+  serverId?: string;
 }
 
 export interface Food {
@@ -33,6 +44,7 @@ export interface Food {
   value: number;
   type: 'normal' | 'gold' | 'speed' | 'star' | 'dropped';
   color: string;
+  serverId?: string;
 }
 
 export interface Skin {
@@ -41,6 +53,10 @@ export interface Skin {
   icon: string;
   rarity: 'common' | 'rare' | 'epic' | 'legendary';
   colors: [string, string];
+  price?: number;
+  currency?: 'coins' | 'monedas';
+  hasAura?: boolean;
+  auraType?: 'fire' | 'ice';
 }
 
 export interface ChatMessage {
@@ -49,6 +65,7 @@ export interface ChatMessage {
   displayName: string;
   text: string;
   timestamp: number;
+  serverId?: string;
 }
 
 export interface KillEvent {
@@ -56,4 +73,5 @@ export interface KillEvent {
   killerName: string;
   victimName: string;
   timestamp: number;
+  serverId?: string;
 }
