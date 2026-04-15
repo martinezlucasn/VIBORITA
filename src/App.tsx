@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { StatusBar } from '@capacitor/status-bar';
+import { Capacitor } from '@capacitor/core';
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc, onSnapshot, updateDoc, increment } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
@@ -22,6 +24,11 @@ export default function App() {
   const [quotaExceeded, setQuotaExceeded] = useState(false);
 
   useEffect(() => {
+    // Hide status bar for full screen experience
+    if (Capacitor.isNativePlatform()) {
+      StatusBar.hide().catch(err => console.warn('Could not hide status bar', err));
+    }
+
     // Global error listener for quota errors
     const handleError = (event: ErrorEvent | PromiseRejectionEvent) => {
       const msg = (event instanceof ErrorEvent ? event.message : (event as any).reason?.message || '').toLowerCase();
