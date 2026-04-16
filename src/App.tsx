@@ -11,7 +11,7 @@ import Arena from './components/Arena';
 import TrainingArena from './components/TrainingArena';
 import WagerArena from './components/WagerArena';
 import { motion, AnimatePresence } from 'motion/react';
-import { LogIn, Loader2 } from 'lucide-react';
+import { LogIn, Loader2, ShieldCheck, X } from 'lucide-react';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -22,6 +22,8 @@ export default function App() {
   const [wagerCategory, setWagerCategory] = useState<string>('basica');
   const [botCount, setBotCount] = useState(1);
   const [quotaExceeded, setQuotaExceeded] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [showTerms, setShowTerms] = useState(false);
 
   useEffect(() => {
     // Hide status bar for full screen experience
@@ -277,13 +279,28 @@ export default function App() {
             Viborita
           </motion.h1>
           
-          <p className="mb-12 text-xl tracking-wide text-gray-400">
+          <p className="mb-8 text-xl tracking-wide text-gray-400">
             Apuesta en base a tus habilidades, <span className="text-blue-400">gana dinero</span>
           </p>
+
+          <div className="mb-8 flex flex-col items-center gap-4">
+            <label className="flex cursor-pointer items-center gap-3 rounded-2xl bg-white/5 p-4 transition-all hover:bg-white/10">
+              <input 
+                type="checkbox" 
+                checked={termsAccepted}
+                onChange={(e) => setTermsAccepted(e.target.checked)}
+                className="h-5 w-5 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
+              />
+              <span className="text-sm text-gray-300">
+                Acepto las <button onClick={(e) => { e.preventDefault(); setShowTerms(true); }} className="font-bold text-blue-400 underline hover:text-blue-300">Bases y Condiciones</button> del juego
+              </span>
+            </label>
+          </div>
           
           <button
             onClick={handleLogin}
-            className="group relative flex items-center gap-3 overflow-hidden rounded-full bg-blue-600 px-10 py-5 text-xl font-bold transition-all hover:bg-blue-500 hover:shadow-[0_0_30px_rgba(37,99,235,0.6)] active:scale-95"
+            disabled={!termsAccepted}
+            className="group relative flex items-center gap-3 overflow-hidden rounded-full bg-blue-600 px-10 py-5 text-xl font-bold transition-all hover:bg-blue-500 hover:shadow-[0_0_30px_rgba(37,99,235,0.6)] active:scale-95 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:opacity-50 disabled:shadow-none"
           >
             <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent transition-transform duration-500 group-hover:translate-x-full" />
             <LogIn className="h-6 w-6" /> 
@@ -296,6 +313,82 @@ export default function App() {
             <span className="flex items-center gap-2"><div className="h-1 w-1 rounded-full bg-blue-500" /> Wager Arena</span>
           </div>
         </motion.div>
+
+        <AnimatePresence>
+          {showTerms && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-3xl border border-blue-500/30 bg-gray-900 shadow-2xl"
+              >
+                <div className="flex items-center justify-between border-b border-white/10 p-6">
+                  <div className="flex items-center gap-3">
+                    <ShieldCheck className="text-blue-400" size={24} />
+                    <h2 className="text-xl font-black uppercase tracking-tighter text-white">Bases y Condiciones</h2>
+                  </div>
+                  <button onClick={() => setShowTerms(false)} className="text-gray-500 hover:text-white">
+                    <X size={24} />
+                  </button>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto p-6 text-sm leading-relaxed text-gray-400 custom-scrollbar">
+                  <div className="space-y-6">
+                    <section>
+                      <h3 className="mb-2 font-black uppercase tracking-widest text-blue-400">1. Aceptación de los Términos</h3>
+                      <p>Al acceder y utilizar la aplicación "Viborita", usted acepta estar sujeto a estas Bases y Condiciones. Si no está de acuerdo con alguna parte de estos términos, no podrá utilizar el servicio.</p>
+                    </section>
+
+                    <section>
+                      <h3 className="mb-2 font-black uppercase tracking-widest text-blue-400">2. Elegibilidad</h3>
+                      <p>El usuario declara ser mayor de 18 años. El uso de la plataforma por menores de edad está estrictamente prohibido. Nos reservamos el derecho de solicitar verificación de identidad.</p>
+                    </section>
+
+                    <section>
+                      <h3 className="mb-2 font-black uppercase tracking-widest text-blue-400">3. Moneda Virtual (Monedas y Puntos)</h3>
+                      <p>Las "Monedas" y "Puntos" son activos virtuales dentro del juego. Las Monedas pueden ser adquiridas mediante métodos de pago integrados. Los Puntos se obtienen mediante transferencias manuales o bonificaciones. Estos activos no tienen valor fuera de la plataforma excepto por el sistema de retiros habilitado.</p>
+                    </section>
+
+                    <section>
+                      <h3 className="mb-2 font-black uppercase tracking-widest text-blue-400">4. Mecánica de Apuestas (Wager Arena)</h3>
+                      <p>El usuario reconoce que participar en la "Arena de Apuestas" implica un riesgo de pérdida de sus activos virtuales. El resultado de cada partida depende de la habilidad del jugador. No nos hacemos responsables por pérdidas derivadas de la jugabilidad, desconexiones de red o errores del usuario.</p>
+                    </section>
+
+                    <section>
+                      <h3 className="mb-2 font-black uppercase tracking-widest text-blue-400">5. Sistema de Retiros</h3>
+                      <p>Los retiros de fondos están sujetos a verificación manual. El usuario es responsable de proporcionar un Alias o CBU correcto. No nos responsabilizamos por transferencias enviadas a datos incorrectos proporcionados por el usuario.</p>
+                    </section>
+
+                    <section>
+                      <h3 className="mb-2 font-black uppercase tracking-widest text-blue-400">6. Conducta del Usuario</h3>
+                      <p>Se prohíbe el uso de bots, trampas (cheats) o cualquier software de terceros que altere la jugabilidad. El incumplimiento resultará en la suspensión permanente de la cuenta y la pérdida de activos.</p>
+                    </section>
+
+                    <section>
+                      <h3 className="mb-2 font-black uppercase tracking-widest text-blue-400">7. Privacidad</h3>
+                      <p>Utilizamos Google Sign-In para la autenticación. Solo recolectamos su nombre público y correo electrónico para la gestión de su perfil y seguridad de sus transacciones.</p>
+                    </section>
+
+                    <section>
+                      <h3 className="mb-2 font-black uppercase tracking-widest text-blue-400">8. Limitación de Responsabilidad</h3>
+                      <p>La aplicación se proporciona "tal cual". No garantizamos disponibilidad ininterrumpida y no somos responsables por daños indirectos o fallos técnicos externos.</p>
+                    </section>
+                  </div>
+                </div>
+
+                <div className="border-t border-white/10 p-6">
+                  <button 
+                    onClick={() => { setTermsAccepted(true); setShowTerms(false); }}
+                    className="w-full rounded-2xl bg-blue-600 py-4 font-black uppercase tracking-widest text-white transition-all hover:bg-blue-500"
+                  >
+                    Aceptar y Continuar
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
       </div>
     );
   }

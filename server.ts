@@ -21,11 +21,13 @@ const firebaseApp = admin.initializeApp({
 });
 
 const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
+console.log(`Firebase Admin initialized for project: ${firebaseConfig.projectId}`);
 
 // Initialize Supabase Admin (using service role if available, otherwise anon)
 const supabaseUrl = process.env.VITE_SUPABASE_URL || '';
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
 const supabase = createClient(supabaseUrl, supabaseKey);
+console.log(`Supabase client initialized. URL: ${!!supabaseUrl}, Key: ${!!supabaseKey}, ServiceRole: ${!!process.env.SUPABASE_SERVICE_ROLE_KEY}`);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -89,9 +91,9 @@ async function startServer() {
       
       // Ensure notification_url is only set if we have a valid public host
       const host = req.headers.host;
-      const protocol = req.headers['x-forwarded-proto'] || 'https';
       const isLocal = host?.includes('localhost') || host?.includes('127.0.0.1');
-      const notificationUrl = isLocal ? undefined : `${protocol}://${host}/api/webhook`;
+      // Force HTTPS for Mercado Pago webhooks as they require it
+      const notificationUrl = isLocal ? undefined : `https://${host}/api/webhook`;
 
       console.log(`Creating preference for user ${userId}, amount ${amount}, host: ${host}, url: ${notificationUrl}`);
 
@@ -136,10 +138,12 @@ async function startServer() {
 
   app.post("/api/webhook", async (req, res) => {
     const { query, body } = req;
-    const topic = query.topic || query.type || body.type;
+    
+    // Mercado Pago sends topic/id in different places depending on the version
+    const topic = query.topic || query.type || body.type || body.action;
     const id = query.id || body.data?.id || body.id;
 
-    console.log(`Webhook received: topic=${topic}, id=${id}`);
+    console.log(`Webhook received: topic=${topic}, id=${id}, action=${body.action}`);
     
     // Log to Firestore for debugging
     try {
@@ -154,7 +158,12 @@ async function startServer() {
       console.error("Error logging webhook to Firestore:", e);
     }
 
-    if ((topic === 'payment' || topic === 'payment.updated') && client && id) {
+    const isPaymentEvent = topic === 'payment' || 
+                          topic === 'payment.updated' || 
+                          topic === 'payment.created' ||
+                          (typeof topic === 'string' && topic.includes('payment'));
+
+    if (isPaymentEvent && client && id) {
       const paymentId = String(id);
       
       try {
@@ -239,48 +248,62 @@ async function startServer() {
           }
 
           // 3. Update Supabase Profile
-          const { data: profile, error: profileError } = await supabase
-            .from('profiles')
-            .select('monedas, coins')
-            .eq('id', userId)
-            .single();
-
-          if (!profileError && profile) {
-            const updates: any = {};
-            if (purchaseType === 'points') {
-              updates.coins = (profile.coins || 0) + pointsToAdd;
-            } else {
-              updates.monedas = (profile.monedas || 0) + amount;
-              if (amount === 100000) {
-                updates.coins = (profile.coins || 0) + 50000;
-              }
-            }
-
-            await supabase
+          try {
+            const { data: profile, error: profileError } = await supabase
               .from('profiles')
-              .update(updates)
-              .eq('id', userId);
+              .select('monedas, coins')
+              .eq('id', userId)
+              .maybeSingle(); // Use maybeSingle to avoid error if not found
+
+            if (profileError) {
+              console.error("Error fetching Supabase profile:", profileError);
+            } else if (profile) {
+              const updates: any = {};
+              if (purchaseType === 'points') {
+                updates.coins = (profile.coins || 0) + pointsToAdd;
+              } else {
+                updates.monedas = (profile.monedas || 0) + amount;
+                if (amount === 100000) {
+                  updates.coins = (profile.coins || 0) + 50000;
+                }
+              }
+
+              const { error: updateError } = await supabase
+                .from('profiles')
+                .update(updates)
+                .eq('id', userId);
+              
+              if (updateError) console.error("Error updating Supabase profile:", updateError);
+            } else {
+              console.warn(`Supabase profile not found for user ${userId}. Skipping Supabase update.`);
+            }
+          } catch (supabaseErr) {
+            console.error("Supabase operation failed:", supabaseErr);
           }
 
           // 4. Log Transaction in Supabase
-          await supabase.from('transactions').insert({
-            user_id: userId,
-            type: 'received',
-            currency: purchaseType === 'points' ? 'coins' : 'monedas',
-            amount: purchaseType === 'points' ? pointsToAdd : amount,
-            reason: `mercado_pago_purchase: ${paymentId}`,
-            timestamp: new Date().toISOString()
-          });
-
-          if (purchaseType === 'monedas' && amount === 100000) {
+          try {
             await supabase.from('transactions').insert({
               user_id: userId,
               type: 'received',
-              currency: 'coins',
-              amount: 50000,
-              reason: `mercado_pago_bonus: ${paymentId}`,
+              currency: purchaseType === 'points' ? 'coins' : 'monedas',
+              amount: purchaseType === 'points' ? pointsToAdd : amount,
+              reason: `mercado_pago_purchase: ${paymentId}`,
               timestamp: new Date().toISOString()
             });
+
+            if (purchaseType === 'monedas' && amount === 100000) {
+              await supabase.from('transactions').insert({
+                user_id: userId,
+                type: 'received',
+                currency: 'coins',
+                amount: 50000,
+                reason: `mercado_pago_bonus: ${paymentId}`,
+                timestamp: new Date().toISOString()
+              });
+            }
+          } catch (logErr) {
+            console.error("Error logging transaction to Supabase:", logErr);
           }
 
           console.log(`Successfully credited ${amount} ${purchaseType} to user ${userId}`);

@@ -26,11 +26,12 @@
         "userId": { "type": "string" },
         "email": { "type": "string" },
         "type": { "type": "string", "enum": ["pro", "millonario"] },
-        "price": { "type": "number" },
+        "coinsPrice": { "type": "number" },
+        "monedasPrice": { "type": "number" },
         "expiry": { "type": "number" },
         "timestamp": { "type": "number" }
       },
-      "required": ["userId", "type", "price", "expiry", "timestamp"]
+      "required": ["userId", "type", "coinsPrice", "monedasPrice", "expiry", "timestamp"]
     },
     "PlayerSession": {
       "title": "PlayerSession",

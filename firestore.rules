@@ -107,10 +107,11 @@ service cloud.firestore {
     }
 
     function isValidTicketPurchase(data) {
-      return data.keys().hasAll(['userId', 'type', 'price', 'expiry', 'timestamp']) &&
+      return data.keys().hasAll(['userId', 'type', 'coinsPrice', 'monedasPrice', 'expiry', 'timestamp']) &&
              data.userId is string &&
              data.type in ['pro', 'millonario'] &&
-             data.price is number &&
+             data.coinsPrice is number &&
+             data.monedasPrice is number &&
              data.expiry is number &&
              data.timestamp is number &&
              (!('email' in data) || data.email is string);

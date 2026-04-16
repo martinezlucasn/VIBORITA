@@ -174,10 +174,12 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
       }).catch(e => handleFirestoreError(e, OperationType.CREATE, 'ticketPurchases'));
 
       // 3. Sync with Supabase
-      await supabase.from('profiles').update({
+      const { error: supabaseError } = await supabase.from('profiles').update({
         coins: user.coins - coinsPrice,
         monedas: user.monedas - monedasPrice
       }).eq('id', user.id);
+
+      if (supabaseError) throw supabaseError;
 
       setTicketMessage({ text: `Entrada ${type.toUpperCase()} comprada por 24hs`, type: 'success' });
       setTimeout(() => setTicketMessage(null), 3000);
@@ -1277,7 +1279,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                   <div className="mt-6 flex flex-col items-center justify-center gap-2">
                     <div className="flex items-center gap-2">
                       <GoldPointIcon size={20} />
-                      <span className="text-2xl font-black text-yellow-500">500</span>
+                      <span className="text-2xl font-black text-yellow-500">5000</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <MonedasIcon size={20} />
@@ -1285,11 +1287,11 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                     </div>
                   </div>
                   <button
-                    onClick={() => handleBuyTicket('pro', 500, 500)}
-                    disabled={user.coins < 500 || user.monedas < 500}
+                    onClick={() => handleBuyTicket('pro', 5000, 500)}
+                    disabled={user.coins < 5000 || user.monedas < 500 || (user.proAccessUntil && user.proAccessUntil > Date.now())}
                     className="mt-8 w-full rounded-xl bg-blue-600 py-4 font-black uppercase tracking-widest text-white transition-all hover:bg-blue-500 disabled:opacity-50"
                   >
-                    Comprar Entrada
+                    {user.proAccessUntil && user.proAccessUntil > Date.now() ? 'Entrada Activa' : 'Comprar Entrada'}
                   </button>
                 </div>
 
@@ -1304,7 +1306,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                   <div className="mt-6 flex flex-col items-center justify-center gap-2">
                     <div className="flex items-center gap-2">
                       <GoldPointIcon size={20} />
-                      <span className="text-2xl font-black text-yellow-500">1000</span>
+                      <span className="text-2xl font-black text-yellow-500">10000</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <MonedasIcon size={20} />
@@ -1312,11 +1314,11 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                     </div>
                   </div>
                   <button
-                    onClick={() => handleBuyTicket('millonario', 1000, 1000)}
-                    disabled={user.coins < 1000 || user.monedas < 1000}
+                    onClick={() => handleBuyTicket('millonario', 10000, 1000)}
+                    disabled={user.coins < 10000 || user.monedas < 1000 || (user.millonarioAccessUntil && user.millonarioAccessUntil > Date.now())}
                     className="mt-8 w-full rounded-xl bg-yellow-600 py-4 font-black uppercase tracking-widest text-white transition-all hover:bg-yellow-500 disabled:opacity-50"
                   >
-                    Comprar Entrada
+                    {user.millonarioAccessUntil && user.millonarioAccessUntil > Date.now() ? 'Entrada Activa' : 'Comprar Entrada'}
                   </button>
                 </div>
               </div>

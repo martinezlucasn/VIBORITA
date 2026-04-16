@@ -30,11 +30,12 @@ export default function AdminPanel({ onClose }: AdminPanelProps) {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [customAmounts, setCustomAmounts] = useState<Record<string, string>>({});
-  const [activeTab, setActiveTab] = useState<'users' | 'withdrawals' | 'webhooks'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'withdrawals' | 'webhooks' | 'payments'>('users');
   const [withdrawalFilter, setWithdrawalFilter] = useState<'all' | 'pending' | 'completed'>('all');
   const [transactionIds, setTransactionIds] = useState<Record<string, string>>({});
   const [selectedWithdrawal, setSelectedWithdrawal] = useState<WithdrawalRequest | null>(null);
   const [webhooks, setWebhooks] = useState<any[]>([]);
+  const [processedPayments, setProcessedPayments] = useState<any[]>([]);
 
   useEffect(() => {
     setLoading(true);
@@ -64,10 +65,19 @@ export default function AdminPanel({ onClose }: AdminPanelProps) {
       console.error("Error fetching webhooks:", e);
     });
 
+    const qPayments = query(collection(db, 'processed_payments'), orderBy('timestamp', 'desc'), limit(50));
+    const unsubPayments = onSnapshot(qPayments, (snapshot) => {
+      const fetchedPayments = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setProcessedPayments(fetchedPayments);
+    }, (e) => {
+      console.error("Error fetching processed payments:", e);
+    });
+
     return () => {
       unsubUsers();
       unsubWithdrawals();
       unsubWebhooks();
+      unsubPayments();
     };
   }, []);
 
@@ -188,6 +198,12 @@ export default function AdminPanel({ onClose }: AdminPanelProps) {
                 className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition-all ${activeTab === 'webhooks' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white'}`}
               >
                 <History size={18} /> Webhooks
+              </button>
+              <button 
+                onClick={() => setActiveTab('payments')}
+                className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition-all ${activeTab === 'payments' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white'}`}
+              >
+                <CreditCard size={18} /> Pagos
               </button>
             </div>
 
@@ -398,6 +414,47 @@ export default function AdminPanel({ onClose }: AdminPanelProps) {
                   <div className="flex flex-col items-center justify-center py-20 text-gray-500">
                     <History size={48} className="mb-4 opacity-20" />
                     <p className="font-bold">No hay solicitudes de retiro</p>
+                  </div>
+                )}
+              </div>
+            ) : activeTab === 'payments' ? (
+              <div className="space-y-3 overflow-y-auto max-h-[50vh] pr-2 custom-scrollbar">
+                <div className="mb-4 rounded-xl bg-green-500/10 p-4 border border-green-500/20">
+                  <p className="text-xs text-green-300">
+                    Pagos procesados y acreditados exitosamente a través del Webhook.
+                  </p>
+                </div>
+                {processedPayments.map(p => (
+                  <div key={p.id} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="rounded-full bg-green-500/20 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-green-400">
+                          Acreditado
+                        </span>
+                        <span className="text-[10px] font-bold text-gray-500 uppercase">{p.purchaseType || 'monedas'}</span>
+                      </div>
+                      <span className="text-[10px] text-gray-500">{p.timestamp ? new Date(p.timestamp.seconds * 1000).toLocaleString() : 'Reciente'}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-black text-white">Usuario: {users.find(u => u.id === p.userId)?.displayName || p.userId}</p>
+                        <p className="text-[10px] font-mono text-gray-500">ID Pago: {p.id}</p>
+                      </div>
+                      <div className="text-right">
+                        <div className="flex items-center gap-1 text-lg font-black text-white">
+                          +{p.amount} {p.purchaseType === 'points' ? <GoldPointIcon size={16} /> : <MonedasIcon size={16} />}
+                        </div>
+                        {p.pointsAdded > 0 && p.purchaseType !== 'points' && (
+                          <p className="text-[10px] font-bold text-yellow-500">+{p.pointsAdded} Puntos (Bono)</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {processedPayments.length === 0 && (
+                  <div className="flex flex-col items-center justify-center py-20 text-gray-500">
+                    <CreditCard size={48} className="mb-4 opacity-20" />
+                    <p className="font-bold uppercase tracking-widest">No hay pagos procesados</p>
                   </div>
                 )}
               </div>
