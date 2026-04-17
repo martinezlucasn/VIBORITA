@@ -1,15 +1,18 @@
-import { useState, useEffect } from 'react';
-import { User, Skin } from '../types';
+import React, { useState, useEffect, useRef, ChangeEvent } from 'react';
+import { User, Skin, Friendship, Notification as GameNotification } from '../types';
 import { ALL_SKINS } from '../constants';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 import { supabase } from '../lib/supabase';
-import { Coins, Play, ShoppingBag, User as UserIcon, Trophy, ArrowLeft, Plus, Copy, ExternalLink, Check, X, Zap, Users, ShieldCheck, History, LogOut, Trash2, CreditCard } from 'lucide-react';
+import { Coins, Play, ShoppingBag, User as UserIcon, Trophy, ArrowLeft, Plus, Copy, ExternalLink, Check, X, Zap, Users, ShieldCheck, History, LogOut, Trash2, CreditCard, UserPlus, Search, Send, MessageSquare, Heart, Loader2, Award, Moon, Target, Skull, Camera, Upload, BrainCircuit, Sparkles } from 'lucide-react';
 import { GoldPointIcon, MonedasIcon } from './Icons';
 import AdminPanel from './AdminPanel';
-import { doc, updateDoc, onSnapshot, collection, query, where, orderBy, limit, getDocs, setDoc, addDoc, deleteDoc, getDoc } from 'firebase/firestore';
-import { db, handleFirestoreError, auth, OperationType } from '../firebase';
-import { AnimatePresence } from 'motion/react';
+import { doc, updateDoc, onSnapshot, collection, query, where, orderBy, limit, getDocs, setDoc, addDoc, deleteDoc, getDoc, arrayUnion, increment } from 'firebase/firestore';
+import { db, handleFirestoreError, auth, OperationType, storage } from '../firebase';
+import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
+import { GoogleGenAI } from "@google/genai";
 import { signOut, deleteUser } from 'firebase/auth';
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 interface MenuProps {
   user: User;
@@ -40,6 +43,87 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
   const [selectedCoinPackage, setSelectedCoinPackage] = useState<number | null>(null);
   const [selectedPointPackage, setSelectedPointPackage] = useState<{ points: number, price: number } | null>(null);
   const [isCreatingPreference, setIsCreatingPreference] = useState(false);
+  const [friendships, setFriendships] = useState<Friendship[]>([]);
+  const [notifications, setNotifications] = useState<GameNotification[]>([]);
+  const [friendSearch, setFriendSearch] = useState('');
+  const [selectedFriend, setSelectedFriend] = useState<User | null>(null);
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [transferAmount, setTransferAmount] = useState(0);
+  const [transferCurrency, setTransferCurrency] = useState<'coins' | 'monedas'>('coins');
+  const [friendProfiles, setFriendProfiles] = useState<Record<string, User>>({});
+  const [showUsernameModal, setShowUsernameModal] = useState(false);
+  const [tempUsername, setTempUsername] = useState(user.displayName);
+  const [isCheckingUsername, setIsCheckingUsername] = useState(false);
+  const [duelWager, setDuelWager] = useState(10);
+  const [selectedMedal, setSelectedMedal] = useState<any>(null);
+  const [unlockedMedalIds, setUnlockedMedalIds] = useState<string[]>([]);
+  const [medalNotification, setMedalNotification] = useState<any>(null);
+
+  const isInitialMedalCheck = useRef(true);
+
+  useEffect(() => {
+    const acceptedFriends = friendships.filter(f => f.status === 'accepted').length;
+    const maxMatches = Math.max(0, ...friendships.map(f => f.gamesPlayed || 0));
+    const botKills = user.botKills || 0;
+    const insomnia = user.insomniaCount || 0;
+    const money = user.highScoreMonedas || 0;
+
+    const currentMedals = [
+      { id: 'f_b', name: 'Amistad de Bronce', unlocked: acceptedFriends >= 10 },
+      { id: 'f_s', name: 'Amistad de Plata', unlocked: acceptedFriends >= 50 },
+      { id: 'f_g', name: 'Amistad de Oro', unlocked: acceptedFriends >= 100 },
+      { id: 'f_p', name: 'Amistad de Platino', unlocked: acceptedFriends >= 1000 },
+      { id: 'd_b', name: 'Duelo de Bronce', unlocked: maxMatches >= 500 },
+      { id: 'd_s', name: 'Duelo de Plata', unlocked: maxMatches >= 1000 },
+      { id: 'd_g', name: 'Duelo de Oro', unlocked: maxMatches >= 2500 },
+      { id: 'm_b', name: 'Dinero de Bronce', unlocked: money >= 1000 },
+      { id: 'm_s', name: 'Dinero de Plata', unlocked: money >= 10000 },
+      { id: 'm_g', name: 'Dinero de Oro', unlocked: money >= 500000 },
+      { id: 'e_b', name: 'Eliminador de Bronce', unlocked: botKills >= 10 },
+      { id: 'e_s', name: 'Eliminador de Plata', unlocked: botKills >= 1000 },
+      { id: 'e_g', name: 'Eliminador de Oro', unlocked: botKills >= 10000 },
+      { id: 'i_b', name: 'Insomnio de Bronce', unlocked: insomnia >= 1 },
+      { id: 'i_s', name: 'Insomnio de Plata', unlocked: insomnia >= 100 },
+      { id: 'i_g', name: 'Insomnio de Oro', unlocked: insomnia >= 1000 },
+    ];
+
+    const newlyUnlocked = currentMedals.filter(m => m.unlocked && !unlockedMedalIds.includes(m.id));
+    
+    if (newlyUnlocked.length > 0) {
+      if (!isInitialMedalCheck.current) {
+        // Show notification for each newly unlocked medal (showing the first in the stack)
+        setMedalNotification(newlyUnlocked[0]);
+        setTimeout(() => setMedalNotification(null), 5000);
+      }
+      setUnlockedMedalIds(currentMedals.filter(m => m.unlocked).map(m => m.id));
+    }
+    isInitialMedalCheck.current = false;
+  }, [friendships, user.botKills, user.insomniaCount, user.highScoreMonedas, unlockedMedalIds]);
+
+  useEffect(() => {
+    const checkInsomnia = async () => {
+      const now = new Date();
+      const hour = now.getHours();
+      if (hour >= 0 && hour < 5) {
+        // Only increment once per session to avoid quota issues
+        const sessionKey = `insomnia_checked_${user.id}_${now.toDateString()}`;
+        if (!sessionStorage.getItem(sessionKey)) {
+          const userRef = doc(db, 'users', user.id);
+          await updateDoc(userRef, {
+            insomniaCount: increment(1)
+          });
+          sessionStorage.setItem(sessionKey, 'true');
+        }
+      }
+    };
+    checkInsomnia();
+  }, [user.id]);
+
+  useEffect(() => {
+    if (!user.usernameSet) {
+      setShowUsernameModal(true);
+    }
+  }, [user.usernameSet]);
 
   // Profile States
   const [newUsername, setNewUsername] = useState(user.displayName);
@@ -47,17 +131,42 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
   const [withdrawAlias, setWithdrawAlias] = useState('');
   const [profileMessage, setProfileMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const [isGeneratingAvatar, setIsGeneratingAvatar] = useState(false);
   const [withdrawalHistory, setWithdrawalHistory] = useState<any[]>([]);
+  const [purchaseHistory, setPurchaseHistory] = useState<any[]>([]);
   const [currentTime, setCurrentTime] = useState(Date.now());
+  const [profileTab, setProfileTab] = useState<'general' | 'friends'>('general');
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const paymentStatus = params.get('payment');
+    const paymentId = params.get('payment_id') || params.get('id');
     
     if (paymentStatus === 'success') {
-      setTicketMessage({ text: '¡Pago aprobado! Tus monedas se acreditarán en segundos.', type: 'success' });
-      // Clean up URL
-      window.history.replaceState({}, document.title, window.location.pathname);
+      setTicketMessage({ text: '¡Pago aprobado! Verificando acreditación...', type: 'success' });
+      
+      // Proactive check if we have a payment ID
+      if (paymentId) {
+        fetch(`/api/check-payment/${paymentId}`)
+          .then(res => res.json())
+          .then(data => {
+            if (data.status === 'success') {
+              setTicketMessage({ text: '¡Monedas acreditadas exitosamente!', type: 'success' });
+            } else {
+              setTicketMessage({ text: 'Pago recibido. Se acreditará en unos momentos.', type: 'success' });
+            }
+          })
+          .catch(err => {
+            console.error("Error checking payment:", err);
+          });
+      }
+
+      // Clean up URL after a delay or after check
+      setTimeout(() => {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }, 2000);
+
       setTimeout(() => setTicketMessage(null), 5000);
     } else if (paymentStatus === 'failure') {
       setTicketMessage({ text: 'El pago fue cancelado o rechazado.', type: 'error' });
@@ -77,8 +186,11 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
     if (view === 'profile' || view === 'wallet') {
       const q = query(collection(db, 'withdrawals'), where('userId', '==', user.id), orderBy('timestamp', 'desc'));
       const unsubscribe = onSnapshot(q, (snapshot) => {
-        const history = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setWithdrawalHistory(history);
+        const historyMap = new Map<string, any>();
+        snapshot.forEach(doc => {
+          historyMap.set(doc.id, { ...doc.data(), id: doc.id });
+        });
+        setWithdrawalHistory(Array.from(historyMap.values()));
       }, (e) => handleFirestoreError(e, OperationType.LIST, 'withdrawals'));
       return () => unsubscribe();
     }
@@ -96,14 +208,50 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
   useEffect(() => {
     const q = query(collection(db, 'users'), orderBy('coins', 'desc'), limit(100));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const players: User[] = [];
+      const playersMap = new Map<string, User>();
       snapshot.forEach((doc) => {
-        players.push({ id: doc.id, ...doc.data() } as User);
+        playersMap.set(doc.id, { ...doc.data(), id: doc.id } as User);
       });
-      setTopPlayers(players);
+      setTopPlayers(Array.from(playersMap.values()));
     }, (e) => handleFirestoreError(e, OperationType.LIST, 'users'));
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    const q = query(collection(db, 'friendships'), where('uids', 'array-contains', user.id));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const friendsMap = new Map<string, Friendship>();
+      snapshot.forEach(doc => {
+        friendsMap.set(doc.id, { ...doc.data(), id: doc.id } as Friendship);
+      });
+      const friends = Array.from(friendsMap.values());
+      setFriendships(friends);
+      
+      // Fetch profiles for all friends
+      friends.forEach(async (f) => {
+        const friendId = f.uids.find(id => id !== user.id);
+        if (friendId && !friendProfiles[friendId]) {
+          const friendDoc = await getDoc(doc(db, 'users', friendId));
+          if (friendDoc.exists()) {
+            setFriendProfiles(prev => ({ ...prev, [friendId]: { ...friendDoc.data(), id: friendId } as User }));
+          }
+        }
+      });
+    }, (e) => handleFirestoreError(e, OperationType.LIST, 'friendships'));
+    return () => unsubscribe();
+  }, [user.id]);
+
+  useEffect(() => {
+    const q = query(collection(db, 'notifications'), where('toId', '==', user.id), where('status', '==', 'pending'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const notifsMap = new Map<string, GameNotification>();
+      snapshot.forEach(doc => {
+        notifsMap.set(doc.id, { ...doc.data(), id: doc.id } as GameNotification);
+      });
+      setNotifications(Array.from(notifsMap.values()));
+    }, (e) => handleFirestoreError(e, OperationType.LIST, 'notifications'));
+    return () => unsubscribe();
+  }, [user.id]);
 
   const handleExchangePoints = async (points: number, monedasCost: number) => {
     if (user.monedas < monedasCost) {
@@ -205,16 +353,226 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const equippedSkin = ALL_SKINS.find(s => s.id === user.equippedSkin) || ALL_SKINS[0];
+  const handleSendFriendRequest = async (search: string) => {
+    if (!search.trim()) return;
+    
+    try {
+      let targetUser: User | null = null;
+      
+      // Search by Username (displayName) first
+      const qName = query(collection(db, 'users'), where('displayName', '==', search.trim()));
+      const snapName = await getDocs(qName);
+      
+      if (!snapName.empty) {
+        targetUser = { id: snapName.docs[0].id, ...snapName.docs[0].data() } as User;
+      } else {
+        // Search by ID
+        const idDoc = await getDoc(doc(db, 'users', search.trim()));
+        if (idDoc.exists()) {
+          targetUser = { id: idDoc.id, ...idDoc.data() } as User;
+        } else {
+          // Search by Email (lowercase)
+          const qEmail = query(collection(db, 'users'), where('email', '==', search.trim().toLowerCase()));
+          const snapEmail = await getDocs(qEmail);
+          if (!snapEmail.empty) {
+            targetUser = { id: snapEmail.docs[0].id, ...snapEmail.docs[0].data() } as User;
+          }
+        }
+      }
 
-  const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
-    ? '' 
-    : 'https://ais-pre-q3rghkaneiw6ol5cicebm3-79875930852.us-east1.run.app';
+      if (!targetUser) {
+        setProfileMessage({ text: 'Usuario no encontrado', type: 'error' });
+        return;
+      }
+
+      if (targetUser.id === user.id) {
+        setProfileMessage({ text: 'No puedes enviarte una solicitud a ti mismo', type: 'error' });
+        return;
+      }
+
+      // Check if already friends or request pending
+      const existingQ = query(collection(db, 'friendships'), where('uids', 'array-contains', user.id));
+      const existingSnapshot = await getDocs(existingQ);
+      const alreadyExists = existingSnapshot.docs.some(doc => {
+        const data = doc.data();
+        return data.uids.includes(targetUser!.id);
+      });
+
+      if (alreadyExists) {
+        setProfileMessage({ text: 'Ya existe una relación o solicitud pendiente', type: 'error' });
+        return;
+      }
+
+      await addDoc(collection(db, 'friendships'), {
+        uids: [user.id, targetUser.id],
+        status: 'pending',
+        requesterId: user.id,
+        gamesPlayed: 0,
+        stats: {
+          [user.id]: { wins: 0 },
+          [targetUser.id]: { wins: 0 }
+        },
+        timestamp: Date.now()
+      });
+
+      setProfileMessage({ text: 'Solicitud enviada correctamente', type: 'success' });
+      setFriendSearch('');
+    } catch (e) {
+      console.error('Error sending friend request:', e);
+      setProfileMessage({ text: 'Error al enviar solicitud', type: 'error' });
+    }
+    setTimeout(() => setProfileMessage(null), 3000);
+  };
+
+  const handleAcceptFriendRequest = async (friendshipId: string) => {
+    try {
+      await updateDoc(doc(db, 'friendships', friendshipId), {
+        status: 'accepted',
+        timestamp: Date.now()
+      });
+      setProfileMessage({ text: 'Solicitud aceptada', type: 'success' });
+    } catch (e) {
+      handleFirestoreError(e, OperationType.UPDATE, 'friendships/' + friendshipId);
+    }
+    setTimeout(() => setProfileMessage(null), 3000);
+  };
+
+  const handleRejectFriendRequest = async (friendshipId: string) => {
+    try {
+      await deleteDoc(doc(db, 'friendships', friendshipId));
+      setProfileMessage({ text: 'Solicitud rechazada', type: 'success' });
+    } catch (e) {
+      handleFirestoreError(e, OperationType.DELETE, 'friendships/' + friendshipId);
+    }
+    setTimeout(() => setProfileMessage(null), 3000);
+  };
+
+  const handleInviteFriend = async (friendId: string, wager: number) => {
+    if (user.monedas < wager) {
+      setProfileMessage({ text: 'No tienes suficientes monedas', type: 'error' });
+      return;
+    }
+
+    try {
+      const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+      
+      // Create private room
+      await setDoc(doc(db, 'privateRooms', roomId), {
+        id: roomId,
+        creatorId: user.id,
+        wager,
+        createdAt: Date.now(),
+        status: 'open'
+      });
+
+      // Send notification
+      await addDoc(collection(db, 'notifications'), {
+        type: 'game_invite',
+        fromId: user.id,
+        fromName: user.displayName,
+        toId: friendId,
+        roomId,
+        wager,
+        status: 'pending',
+        timestamp: Date.now()
+      });
+
+      setProfileMessage({ text: 'Invitación enviada', type: 'success' });
+      onStartWager(wager, 10, `private_${roomId}`);
+    } catch (e) {
+      console.error('Error inviting friend:', e);
+      setProfileMessage({ text: 'Error al enviar invitación', type: 'error' });
+    }
+  };
+
+  const handleConfirmUsername = async () => {
+    if (!tempUsername.trim() || tempUsername.length < 3) {
+      setProfileMessage({ text: 'Nombre demasiado corto', type: 'error' });
+      return;
+    }
+
+    setIsCheckingUsername(true);
+    try {
+      // Check if username is taken
+      const q = query(collection(db, 'users'), where('displayName', '==', tempUsername.trim()));
+      const snapshot = await getDocs(q);
+      
+      if (!snapshot.empty && snapshot.docs[0].id !== user.id) {
+        setProfileMessage({ text: 'Este nombre de usuario ya está en uso', type: 'error' });
+        setIsCheckingUsername(false);
+        return;
+      }
+
+      const userRef = doc(db, 'users', user.id);
+      await updateDoc(userRef, {
+        displayName: tempUsername.trim(),
+        usernameSet: true
+      });
+
+      // Sync with Supabase
+      await supabase.from('profiles').update({
+        display_name: tempUsername.trim()
+      }).eq('id', user.id);
+
+      setShowUsernameModal(false);
+      setProfileMessage({ text: 'Nombre de usuario actualizado', type: 'success' });
+    } catch (e) {
+      console.error('Error updating username:', e);
+      setProfileMessage({ text: 'Error al actualizar nombre', type: 'error' });
+    } finally {
+      setIsCheckingUsername(false);
+      setTimeout(() => setProfileMessage(null), 3000);
+    }
+  };
+
+  const handleTransfer = async (friendId: string, amount: number, currency: 'coins' | 'monedas') => {
+    if (amount <= 0) return;
+    if ((currency === 'coins' ? user.coins : user.monedas) < amount) {
+      setProfileMessage({ text: 'Saldo insuficiente', type: 'error' });
+      return;
+    }
+
+    try {
+      const userRef = doc(db, 'users', user.id);
+      const friendRef = doc(db, 'users', friendId);
+
+      await updateDoc(userRef, {
+        [currency]: increment(-amount)
+      });
+
+      await updateDoc(friendRef, {
+        [currency]: increment(amount)
+      });
+
+      // Sync Supabase
+      await supabase.from('profiles').update({
+        [currency]: (currency === 'coins' ? user.coins : user.monedas) - amount
+      }).eq('id', user.id);
+
+      const friendDoc = await getDoc(friendRef);
+      if (friendDoc.exists()) {
+        const friendData = friendDoc.data();
+        await supabase.from('profiles').update({
+          [currency]: (friendData[currency] || 0)
+        }).eq('id', friendId);
+      }
+
+      setProfileMessage({ text: 'Transferencia exitosa', type: 'success' });
+      setShowTransferModal(false);
+      setTransferAmount(0);
+    } catch (e) {
+      console.error('Error in transfer:', e);
+      setProfileMessage({ text: 'Error al transferir', type: 'error' });
+    }
+    setTimeout(() => setProfileMessage(null), 3000);
+  };
+
+  const equippedSkin = ALL_SKINS.find(s => s.id === user.equippedSkin) || ALL_SKINS[0];
 
   const handleCreatePreference = async (amount: number, type: 'monedas' | 'points' = 'monedas', pointsAmount: number = 0, price?: number) => {
     setIsCreatingPreference(true);
     try {
-      const response = await fetch(`${API_URL}/api/create-preference`, {
+      const response = await fetch(`/api/create-preference`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -265,7 +623,10 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
       }
 
       const userRef = doc(db, 'users', user.id);
-      await updateDoc(userRef, { displayName: newUsername.trim() });
+      await updateDoc(userRef, { 
+        displayName: newUsername.trim(),
+        usernameSet: true 
+      });
       
       // Sync with Supabase
       await supabase.from('profiles').update({ display_name: newUsername.trim() }).eq('id', user.id);
@@ -279,8 +640,157 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
     }
   };
 
+  const compressImage = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = (event) => {
+        const img = new Image();
+        img.src = event.target?.result as string;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_WIDTH = 400;
+          const MAX_HEIGHT = 400;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height *= MAX_WIDTH / width;
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width *= MAX_HEIGHT / height;
+              height = MAX_HEIGHT;
+            }
+          }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.8));
+        };
+      };
+      reader.onerror = (error) => reject(error);
+    });
+  };
+
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!storage) {
+      setProfileMessage({ text: 'Error: El servicio de almacenamiento no está activado en Firebase Console.', type: 'error' });
+      setTimeout(() => setProfileMessage(null), 5000);
+      return;
+    }
+
+    setIsUploadingPhoto(true);
+    try {
+      const compressedDataUrl = await compressImage(file);
+      const response = await fetch(compressedDataUrl);
+      const blob = await response.blob();
+
+      const storageRef = ref(storage, `profiles/${user.id}/avatar.jpg`);
+      const uploadTask = uploadBytesResumable(storageRef, blob);
+
+      await new Promise<void>((resolve, reject) => {
+        uploadTask.on(
+          'state_changed',
+          null,
+          (error) => reject(error),
+          async () => {
+            const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+            const userRef = doc(db, 'users', user.id);
+            await updateDoc(userRef, { photoURL: downloadURL });
+            await supabase.from('profiles').update({ avatar_url: downloadURL }).eq('id', user.id);
+            resolve();
+          }
+        );
+      });
+      setProfileMessage({ text: 'Foto de perfil actualizada', type: 'success' });
+    } catch (error) {
+      console.error('Error uploading photo:', error);
+      setProfileMessage({ text: 'Error al subir la foto', type: 'error' });
+    } finally {
+      setIsUploadingPhoto(false);
+      setTimeout(() => setProfileMessage(null), 3000);
+    }
+  };
+
+  const handleGenerateAIAvatar = async () => {
+    if (!storage) {
+      setProfileMessage({ text: 'Error: El servicio de almacenamiento no está activado en Firebase Console.', type: 'error' });
+      setTimeout(() => setProfileMessage(null), 5000);
+      return;
+    }
+
+    setIsGeneratingAvatar(true);
+    setProfileMessage({ text: 'Generando Avatar con IA...', type: 'success' });
+    try {
+      const prompt = `A circular minimalist logo of a modern game snake avatar, high quality 3D render, vibrant neon colors, dark background, representing ${user.displayName}`;
+      
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash-image",
+        contents: { parts: [{ text: prompt }] },
+        config: {
+          imageConfig: {
+            aspectRatio: "1:1"
+          }
+        }
+      });
+
+      let base64Data = "";
+      if (response.candidates?.[0]?.content?.parts) {
+        for (const part of response.candidates[0].content.parts) {
+          if (part.inlineData) {
+            base64Data = part.inlineData.data;
+            break;
+          }
+        }
+      }
+
+      if (!base64Data) throw new Error("No image data generated");
+
+      const byteCharacters = atob(base64Data);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: 'image/png' });
+
+      const storageRef = ref(storage, `profiles/${user.id}/ai_avatar.png`);
+      const uploadTask = uploadBytesResumable(storageRef, blob);
+
+      await new Promise<void>((resolve, reject) => {
+        uploadTask.on(
+          'state_changed',
+          null,
+          (error) => reject(error),
+          async () => {
+            const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+            const userRef = doc(db, 'users', user.id);
+            await updateDoc(userRef, { photoURL: downloadURL });
+            await supabase.from('profiles').update({ avatar_url: downloadURL }).eq('id', user.id);
+            resolve();
+          }
+        );
+      });
+
+      setProfileMessage({ text: 'Avatar de IA creado con éxito', type: 'success' });
+    } catch (error) {
+      console.error('Error generating AI avatar:', error);
+      setProfileMessage({ text: 'Error al generar avatar con IA', type: 'error' });
+    } finally {
+      setIsGeneratingAvatar(false);
+      setTimeout(() => setProfileMessage(null), 5000);
+    }
+  };
+
   const handleWithdraw = async () => {
-    if (withdrawAmount <= 0 || withdrawAmount > user.monedas || !withdrawAlias.trim()) return;
+    if (withdrawAmount < 1000 || withdrawAmount > user.monedas || !withdrawAlias.trim()) return;
     setIsUpdatingProfile(true);
     try {
       const userRef = doc(db, 'users', user.id);
@@ -487,7 +997,15 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
           </div>
 
           <div className="flex flex-col items-center w-full">
-            <div className="bg-gray-800/80 px-4 py-1.5 rounded-t-xl border-t border-x border-white/10 backdrop-blur-md">
+            <div className="bg-gray-800/80 px-4 py-1.5 rounded-t-xl border-t border-x border-white/10 backdrop-blur-md flex items-center gap-2">
+              {user.photoURL && (
+                <img 
+                  src={user.photoURL} 
+                  alt="" 
+                  className="h-4 w-4 rounded-full border border-blue-500/30 object-cover" 
+                  referrerPolicy="no-referrer" 
+                />
+              )}
               <p className="text-[10px] font-black uppercase tracking-widest text-blue-400">
                 Bienvenido <span className="text-white">{user.displayName}</span>
               </p>
@@ -499,7 +1017,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 <div className="flex items-center gap-2">
                   <GoldPointIcon size={20} />
                   <motion.span 
-                    key={user.coins}
+                    key="menu-coins-display"
                     initial={{ scale: 1.2, color: '#4ade80' }}
                     animate={{ scale: 1, color: '#ffffff' }}
                     className="text-2xl font-black"
@@ -516,7 +1034,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 <div className="flex items-center gap-2">
                   <MonedasIcon size={20} />
                   <motion.span 
-                    key={user.monedas}
+                    key="menu-monedas-display"
                     initial={{ scale: 1.2, color: '#60a5fa' }}
                     animate={{ scale: 1, color: '#ffffff' }}
                     className="text-2xl font-black group-hover:text-blue-200 transition-colors"
@@ -566,6 +1084,14 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
               <GoldPointIcon size={24} />
               <span>PUNTOS AVANZADO</span>
             </button>
+
+            <button
+              onClick={() => setView('wallet')}
+              className="flex w-full items-center justify-center gap-3 rounded-2xl bg-blue-600/20 py-6 text-xl font-black uppercase tracking-tighter transition-all hover:bg-blue-600/30 active:scale-95 border border-blue-500/30 shadow-lg"
+            >
+              <CreditCard size={24} className="text-blue-400" />
+              <span>MI BILLETERA</span>
+            </button>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -602,171 +1128,388 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
       )}
 
       {view === 'profile' && (
-        <div className="w-full max-w-md rounded-3xl bg-gray-900/90 p-8 backdrop-blur-xl border border-white/10 shadow-2xl">
+        <div className="w-full max-w-md rounded-3xl bg-gray-900/90 p-8 backdrop-blur-xl border border-white/10 shadow-2xl overflow-y-auto max-h-[90vh] custom-scrollbar">
           <div className="mb-8 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="rounded-full bg-blue-500/20 p-2">
+              <div className="rounded-full bg-blue-500/10 p-2.5 border border-blue-500/20 shadow-[0_0_15px_rgba(59,130,246,0.2)]">
                 <UserIcon className="text-blue-400" size={24} />
               </div>
-              <h2 className="text-3xl font-black italic tracking-tighter text-white uppercase">Mi Perfil</h2>
+              <div>
+                <h2 className="text-3xl font-black italic tracking-tight text-white uppercase leading-none">Mi Perfil</h2>
+                <p className="font-mono text-[9px] text-blue-500/50 uppercase tracking-[0.2em] mt-1">ID: {user.id.slice(0, 8)}...</p>
+              </div>
             </div>
-            <button onClick={() => setView('main')} className="text-gray-400 hover:text-white">
-              <X size={24} />
+            <button onClick={() => setView('main')} className="group flex h-10 w-10 items-center justify-center rounded-full bg-white/5 border border-white/10 text-gray-400 transition-all hover:bg-white/10 hover:text-white">
+              <X size={20} />
+            </button>
+          </div>
+
+          <div className="flex flex-col items-center gap-6 mb-10">
+            <div className="group relative">
+              <div className="relative h-28 w-28 overflow-hidden rounded-full border-2 border-dashed border-blue-500/40 p-1 bg-gray-900 shadow-[0_0_30px_rgba(0,0,0,0.5)]">
+                <div className="h-full w-full overflow-hidden rounded-full bg-gray-800">
+                  {user.photoURL ? (
+                    <img 
+                      src={user.photoURL} 
+                      alt={user.displayName} 
+                      className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-110"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-blue-500/30">
+                      <UserIcon size={48} />
+                    </div>
+                  )}
+                </div>
+                {(isUploadingPhoto || isGeneratingAvatar) && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md transition-all rounded-full z-10">
+                    <Loader2 className="animate-spin text-blue-400 mb-2" size={32} />
+                    <span className="text-[8px] font-mono text-blue-400 uppercase animate-pulse">Procesando</span>
+                  </div>
+                )}
+              </div>
+              <label className="absolute -bottom-1 -right-1 cursor-pointer rounded-full bg-blue-600 p-2.5 text-white shadow-[0_4px_10px_rgba(37,99,235,0.4)] border border-blue-400/30 transition-all hover:scale-110 hover:bg-blue-500 active:scale-95 z-20">
+                <Camera size={18} />
+                <input 
+                  type="file" 
+                  className="hidden" 
+                  accept="image/*" 
+                  onChange={handlePhotoUpload}
+                  disabled={isUploadingPhoto || isGeneratingAvatar}
+                />
+              </label>
+              
+              {/* Radar pulse effect for aesthetics */}
+              <div className="absolute inset-0 -z-10 rounded-full bg-blue-500/10 animate-ping opacity-20" />
+            </div>
+
+            <div className="flex flex-col gap-3 w-full">
+              {!storage && (
+                <div className="rounded-xl bg-red-500/10 border border-red-500/20 p-3 mb-2">
+                  <p className="text-[9px] text-red-400 font-bold uppercase tracking-wider mb-1">Configuración Requerida</p>
+                  <p className="text-[8px] text-gray-400 leading-relaxed italic">
+                    Firebase Storage no parece estar activado. Entra a Firebase Console &gt; Storage y presiona "Comenzar" para habilitar las fotos de perfil.
+                  </p>
+                </div>
+              )}
+              <button
+                onClick={handleGenerateAIAvatar}
+                disabled={isUploadingPhoto || isGeneratingAvatar}
+                className="group relative flex items-center justify-center gap-2 overflow-hidden rounded-xl bg-gray-800/50 py-3.5 text-[10px] font-black uppercase tracking-[0.2em] text-blue-400 transition-all hover:bg-blue-600/10 hover:text-blue-300 border border-blue-500/20"
+              >
+                <div className="absolute inset-0 translate-x-[-100%] bg-gradient-to-r from-transparent via-blue-400/5 to-transparent transition-transform duration-1000 group-hover:translate-x-[100%]" />
+                <Sparkles size={14} className={`${isGeneratingAvatar ? 'animate-spin' : 'animate-pulse text-yellow-500'}`} />
+                <span>Generar Avatar con IA Pro</span>
+              </button>
+              <p className="text-[8px] font-mono text-center text-gray-500 px-4 uppercase tracking-tighter">Utilizando modelo experimental gemini-2.5-flash-image</p>
+            </div>
+          </div>
+
+          <div className="mb-6 flex rounded-2xl bg-gray-800 p-1">
+            <button
+              onClick={() => setProfileTab('general')}
+              className={`flex-1 rounded-xl py-2 text-xs font-bold transition-all ${profileTab === 'general' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              General
+            </button>
+            <button
+              onClick={() => setProfileTab('friends')}
+              className={`flex-1 rounded-xl py-2 text-xs font-bold transition-all ${profileTab === 'friends' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              Amigos
             </button>
           </div>
 
           <div className="space-y-6">
-            {/* Username Section */}
-            <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
-              <label className="mb-2 block text-[10px] font-bold uppercase tracking-widest text-gray-400">Nombre de Usuario (Único)</label>
-              <div className="flex gap-2">
-                <input 
-                  type="text"
-                  value={newUsername}
-                  onChange={(e) => setNewUsername(e.target.value)}
-                  className="flex-1 rounded-xl bg-black/30 px-4 py-3 text-sm font-bold text-white outline-none focus:ring-2 focus:ring-blue-500/50"
-                  placeholder="Nuevo nombre..."
-                />
-                <button 
-                  onClick={handleUpdateUsername}
-                  disabled={isUpdatingProfile || newUsername === user.displayName}
-                  className="rounded-xl bg-blue-600 px-4 font-bold text-white hover:bg-blue-500 disabled:opacity-50"
-                >
-                  <Check size={20} />
-                </button>
-              </div>
-            </div>
-
-            {/* Withdrawal Section */}
-            <div className="rounded-2xl bg-blue-500/5 p-4 border border-blue-500/20">
-              <div className="mb-4 flex items-center justify-between">
-                <label className="block text-[10px] font-bold uppercase tracking-widest text-blue-400">Retirar Dinero (Monedas)</label>
-                <div className="flex items-center gap-1">
-                  <MonedasIcon size={12} />
-                  <span className="text-xs font-black text-white">{user.monedas}</span>
-                </div>
-              </div>
-              
-              <div className="space-y-3">
-                <div className="relative">
-                  <input 
-                    type="number"
-                    value={withdrawAmount || ''}
-                    onChange={(e) => {
-                      const val = e.target.value === '' ? 0 : parseInt(e.target.value);
-                      setWithdrawAmount(isNaN(val) ? 0 : Math.min(user.monedas, val));
-                    }}
-                    className="w-full rounded-xl bg-black/30 px-4 py-3 text-sm font-bold text-white outline-none focus:ring-2 focus:ring-blue-500/50"
-                    placeholder="Cantidad a retirar..."
-                  />
-                  <div className="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-bold text-gray-500">
-                    ARS
+            {profileTab === 'general' ? (
+              <>
+                {/* Username Section */}
+                <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
+                  <label className="mb-2 block text-[10px] font-bold uppercase tracking-widest text-gray-400">Nombre de Usuario (Único)</label>
+                  <div className="flex gap-2">
+                    <input 
+                      type="text"
+                      value={newUsername}
+                      onChange={(e) => setNewUsername(e.target.value)}
+                      className="flex-1 rounded-xl bg-black/30 px-4 py-3 text-sm font-bold text-white outline-none focus:ring-2 focus:ring-blue-500/50"
+                      placeholder="Nuevo nombre..."
+                    />
+                    <button 
+                      onClick={handleUpdateUsername}
+                      disabled={isUpdatingProfile || newUsername === user.displayName}
+                      className="rounded-xl bg-blue-600 px-4 font-bold text-white hover:bg-blue-500 disabled:opacity-50"
+                    >
+                      <Check size={20} />
+                    </button>
                   </div>
                 </div>
-                <input 
-                  type="text"
-                  value={withdrawAlias}
-                  onChange={(e) => setWithdrawAlias(e.target.value)}
-                  className="w-full rounded-xl bg-black/30 px-4 py-3 text-sm font-bold text-white outline-none focus:ring-2 focus:ring-blue-500/50"
-                  placeholder="Alias o CBU de Mercado Pago..."
-                />
-                <button 
-                  onClick={handleWithdraw}
-                  disabled={isUpdatingProfile || withdrawAmount <= 0 || !withdrawAlias.trim()}
-                  className="w-full rounded-xl bg-blue-600 py-4 text-sm font-black uppercase tracking-tighter text-white hover:bg-blue-500 disabled:opacity-50 shadow-lg shadow-blue-500/20"
-                >
-                  Solicitar Retiro
-                </button>
-                <p className="text-[10px] text-center text-gray-500 italic">
-                  * El monto solicitado se descontará de tus monedas actuales.
-                </p>
+
+                {/* Lightweight Mode Toggle */}
+                <div className="rounded-2xl bg-white/5 p-4 border border-white/5 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="rounded-full bg-orange-500/10 p-2">
+                      <Zap size={16} className="text-orange-400" />
+                    </div>
+                    <div>
+                      <p className="text-[11px] font-bold text-white uppercase tracking-wider">Modo Alivianado</p>
+                      <p className="text-[9px] text-gray-500">Reduce efectos visuales para mayor fluidez.</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const userRef = doc(db, 'users', user.id);
+                      updateDoc(userRef, { lightweight: !user.lightweight });
+                    }}
+                    className={`relative inline-flex h-5 w-10 items-center rounded-full transition-colors ${user.lightweight ? 'bg-orange-600' : 'bg-gray-700'}`}
+                  >
+                    <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${user.lightweight ? 'translate-x-[22px]' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+
+                {/* Medal Collection */}
+                <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
+                  <div className="mb-4 flex items-center justify-between">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Colección de Medallas</label>
+                    <Award size={14} className="text-gray-600" />
+                  </div>
+                  
+                  <div className="grid grid-cols-4 gap-3">
+                    {(() => {
+                      const acceptedFriends = friendships.filter(f => f.status === 'accepted').length;
+                      const maxMatches = Math.max(0, ...friendships.map(f => f.gamesPlayed || 0));
+                      const botKills = user.botKills || 0;
+                      const insomnia = user.insomniaCount || 0;
+                      const money = user.highScoreMonedas || 0;
+
+                      const medals = [
+                        // Friendship
+                        { id: 'f_b', name: 'Amistad de Bronce', desc: 'Tener 10 amistades', icon: <Users size={20} />, color: '#cd7f32', current: acceptedFriends, goal: 10, unlocked: acceptedFriends >= 10 },
+                        { id: 'f_s', name: 'Amistad de Plata', desc: 'Tener 50 amistades', icon: <Users size={20} />, color: '#c0c0c0', current: acceptedFriends, goal: 50, unlocked: acceptedFriends >= 50 },
+                        { id: 'f_g', name: 'Amistad de Oro', desc: 'Tener 100 amistades', icon: <Users size={20} />, color: '#ffd700', current: acceptedFriends, goal: 100, unlocked: acceptedFriends >= 100 },
+                        { id: 'f_p', name: 'Amistad de Platino', desc: 'Tener 1000 amistades', icon: <Users size={20} />, color: '#e5e4e2', current: acceptedFriends, goal: 1000, unlocked: acceptedFriends >= 1000 },
+                        // Duel
+                        { id: 'd_b', name: 'Duelo de Bronce', desc: 'Jugar 500 partidas con un amigo', icon: <Zap size={20} />, color: '#cd7f32', current: maxMatches, goal: 500, unlocked: maxMatches >= 500 },
+                        { id: 'd_s', name: 'Duelo de Plata', desc: 'Jugar 1000 partidas con un amigo', icon: <Zap size={20} />, color: '#c0c0c0', current: maxMatches, goal: 1000, unlocked: maxMatches >= 1000 },
+                        { id: 'd_g', name: 'Duelo de Oro', desc: 'Jugar 2500 partidas con un amigo', icon: <Zap size={20} />, color: '#ffd700', current: maxMatches, goal: 2500, unlocked: maxMatches >= 2500 },
+                        // Money
+                        { id: 'm_b', name: 'Dinero de Bronce', desc: 'Llegar a 1.000 monedas', icon: <Coins size={20} />, color: '#cd7f32', current: money, goal: 1000, unlocked: money >= 1000 },
+                        { id: 'm_s', name: 'Dinero de Plata', desc: 'Llegar a 10.000 monedas', icon: <Coins size={20} />, color: '#c0c0c0', current: money, goal: 10000, unlocked: money >= 10000 },
+                        { id: 'm_g', name: 'Dinero de Oro', desc: 'Llegar a 500.000 monedas', icon: <Coins size={20} />, color: '#ffd700', current: money, goal: 500000, unlocked: money >= 500000 },
+                        // Eliminator
+                        { id: 'e_b', name: 'Eliminador de Bronce', desc: 'Matar 10 bots', icon: <Target size={20} />, color: '#cd7f32', current: botKills, goal: 10, unlocked: botKills >= 10 },
+                        { id: 'e_s', name: 'Eliminador de Plata', desc: 'Matar 1.000 bots', icon: <Skull size={20} />, color: '#c0c0c0', current: botKills, goal: 1000, unlocked: botKills >= 1000 },
+                        { id: 'e_g', name: 'Eliminador de Oro', desc: 'Matar 10.000 bots', icon: <Trophy size={20} />, color: '#ffd700', current: botKills, goal: 10000, unlocked: botKills >= 10000 },
+                        // Insomnia
+                        { id: 'i_b', name: 'Insomnio de Bronce', desc: 'Jugar 1 vez (00:00 - 05:00 AM)', icon: <Moon size={20} />, color: '#cd7f32', current: insomnia, goal: 1, unlocked: insomnia >= 1 },
+                        { id: 'i_s', name: 'Insomnio de Plata', desc: 'Jugar 100 veces (00:00 - 05:00 AM)', icon: <Moon size={20} />, color: '#c0c0c0', current: insomnia, goal: 100, unlocked: insomnia >= 100 },
+                        { id: 'i_g', name: 'Insomnio de Oro', desc: 'Jugar 1.000 veces (00:00 - 05:00 AM)', icon: <Moon size={20} />, color: '#ffd700', current: insomnia, goal: 1000, unlocked: insomnia >= 1000 },
+                      ];
+
+                      return medals.map((medal, mIdx) => (
+                        <button
+                          key={`medal-collection-item-v2-${medal.id}-${mIdx}`}
+                          onClick={() => setSelectedMedal(medal)}
+                          className={`group relative flex aspect-square items-center justify-center rounded-xl bg-black/40 border transition-all hover:border-white/20 active:scale-95 ${medal.unlocked ? 'border-white/10 shadow-lg' : 'border-transparent opacity-30 filter grayscale hover:opacity-100'}`}
+                          style={{ borderColor: medal.unlocked ? `${medal.color}44` : 'transparent' }}
+                        >
+                          <div 
+                            className="transition-colors"
+                            style={{ color: medal.unlocked ? medal.color : '#4b5563' }}
+                          >
+                            {medal.icon}
+                          </div>
+                          {medal.unlocked && (
+                            <div 
+                              className="absolute inset-0 rounded-xl opacity-10 animate-pulse"
+                              style={{ backgroundColor: medal.color }}
+                            />
+                          )}
+                          {!medal.unlocked && (
+                             <div className="absolute bottom-1 left-1 right-1 h-1 bg-gray-800 rounded-full overflow-hidden">
+                               <div 
+                                 className="h-full bg-gray-600" 
+                                 style={{ width: `${Math.min(100, (medal.current / medal.goal) * 100)}%` }}
+                               />
+                             </div>
+                          )}
+                        </button>
+                      ));
+                    })()}
+                  </div>
+                </div>
+
+                {/* Danger Zone */}
+                <div className="mt-8 space-y-3 pt-6 border-t border-white/5">
+                  <button
+                    onClick={handleLogout}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-gray-800 py-4 font-bold text-gray-300 transition-colors hover:bg-gray-700 hover:text-white"
+                  >
+                    <LogOut size={18} /> Cerrar Sesión
+                  </button>
+                  
+                  <button
+                    onClick={handleDeleteAccount}
+                    disabled={isUpdatingProfile}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-red-900/20 py-4 font-bold text-red-500 transition-colors hover:bg-red-900/40 disabled:opacity-50"
+                  >
+                    <Trash2 size={18} /> Desvincular Cuenta
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-6">
+                {/* My Username Section */}
+                <div className="rounded-2xl bg-blue-600/10 p-6 border border-blue-500/20 text-center">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-2">Tu Nombre de Usuario</p>
+                  <div className="flex items-center justify-center gap-3">
+                    <span className="text-4xl font-black tracking-tighter text-white uppercase italic">{user.displayName}</span>
+                    <button 
+                      onClick={() => {
+                        navigator.clipboard.writeText(user.displayName);
+                        setProfileMessage({ text: 'Nombre copiado', type: 'success' });
+                        setTimeout(() => setProfileMessage(null), 2000);
+                      }}
+                      className="rounded-lg bg-blue-600/20 p-2 text-blue-400 hover:bg-blue-600/40 transition-all"
+                    >
+                      <Copy size={18} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Add Friend Section */}
+                <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
+                  <label className="mb-2 block text-[10px] font-bold uppercase tracking-widest text-gray-400">AGREGAR AMIGO:</label>
+                  <div className="flex gap-2">
+                    <input 
+                      type="text"
+                      value={friendSearch}
+                      onChange={(e) => setFriendSearch(e.target.value)}
+                      className="flex-1 rounded-xl bg-black/30 px-4 py-3 text-sm font-bold text-white outline-none focus:ring-2 focus:ring-blue-500/50"
+                      placeholder="Nombre de usuario..."
+                    />
+                    <button 
+                      onClick={() => handleSendFriendRequest(friendSearch)}
+                      className="rounded-xl bg-blue-600 px-4 font-bold text-white hover:bg-blue-500"
+                    >
+                      <UserPlus size={20} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Friend Requests Section */}
+                {friendships.filter(f => f.status === 'pending' && f.requesterId !== user.id).length > 0 && (
+                  <div className="space-y-3">
+                    <h3 className="text-xs font-bold uppercase tracking-widest text-yellow-500 flex items-center gap-2">
+                      <Plus size={14} /> Solicitudes Pendientes
+                    </h3>
+                    <div className="space-y-2">
+                      {friendships.filter(f => f.status === 'pending' && f.requesterId !== user.id).map((f, fIdx) => {
+                        const requester = friendProfiles[f.requesterId];
+                        return (
+                          <div key={`friend-request-pending-v2-${f.id}-${fIdx}`} className="flex items-center justify-between rounded-xl bg-yellow-500/5 p-3 border border-yellow-500/20">
+                            <div className="flex items-center gap-3">
+                              <div className="h-8 w-8 rounded-full bg-yellow-500/20 flex items-center justify-center text-yellow-500 font-bold">
+                                {requester?.displayName?.[0].toUpperCase() || '?'}
+                              </div>
+                              <div>
+                                <p className="text-sm font-bold text-white">{requester?.displayName || 'Cargando...'}</p>
+                                <p className="text-[8px] text-gray-500 uppercase tracking-widest">Pendiente</p>
+                              </div>
+                            </div>
+                            <div className="flex gap-2">
+                              <button 
+                                onClick={() => handleAcceptFriendRequest(f.id)}
+                                className="rounded-lg bg-green-500/20 p-2 text-green-400 hover:bg-green-500/40"
+                              >
+                                <Check size={16} />
+                              </button>
+                              <button 
+                                onClick={() => handleRejectFriendRequest(f.id)}
+                                className="rounded-lg bg-red-500/20 p-2 text-red-400 hover:bg-red-900/40"
+                              >
+                                <X size={16} />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Friends List Section */}
+                <div className="space-y-3">
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-blue-400 flex items-center gap-2">
+                    <Users size={14} /> Mis Amigos
+                  </h3>
+                  <div className="max-h-80 space-y-2 overflow-y-auto pr-2 custom-scrollbar">
+                    {friendships.filter(f => f.status === 'accepted').map((f, fIdx) => {
+                      const friendId = f.uids.find(id => id !== user.id)!;
+                      const friend = friendProfiles[friendId];
+                      const isOnline = friend && (currentTime - friend.lastActive < 60000);
+                      
+                      return (
+                        <div 
+                          key={`friend-accepted-list-v2-${f.id}-${fIdx}`} 
+                          onClick={() => friend && setSelectedFriend(friend)}
+                          className="group flex items-center justify-between rounded-xl bg-white/5 p-3 border border-white/5 hover:bg-white/10 transition-all cursor-pointer"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="relative">
+                              <div className="h-10 w-10 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 font-black text-xl">
+                                {friend?.displayName?.[0].toUpperCase() || '?'}
+                              </div>
+                              {isOnline && (
+                                <div className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-green-500 border-2 border-gray-900 shadow-[0_0_8px_rgba(34,197,94,0.6)]" />
+                              )}
+                            </div>
+                            <div>
+                              <p className="text-sm font-black text-white">{friend?.displayName || 'Cargando...'}</p>
+                              <p className="text-[8px] text-gray-500 uppercase tracking-widest">
+                                {isOnline ? <span className="text-green-400">En Línea</span> : 'Desconectado'}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleInviteFriend(friendId, 10);
+                              }}
+                              className="rounded-lg bg-purple-600/20 p-2 text-purple-400 hover:bg-purple-600/40"
+                              title="Invitar a Duelo"
+                            >
+                              <Zap size={16} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {friendships.filter(f => f.status === 'accepted').length === 0 && (
+                      <div className="py-8 text-center">
+                        <Users size={32} className="mx-auto text-gray-800 mb-2" />
+                        <p className="text-[10px] text-gray-600 uppercase font-bold">Aún no tienes amigos</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Feedback Message */}
-            <AnimatePresence>
-              {profileMessage && (
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 10 }}
-                  className={`rounded-xl p-3 text-center text-xs font-bold ${profileMessage.type === 'success' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}
-                >
-                  {profileMessage.text}
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Wallet Shortcut */}
-            <button
-              onClick={() => setView('wallet')}
-              className="flex w-full items-center justify-between rounded-2xl bg-blue-600/10 p-4 border border-blue-500/20 hover:bg-blue-600/20 transition-all group"
-            >
-              <div className="flex items-center gap-3">
-                <div className="rounded-xl bg-blue-600/20 p-2 group-hover:scale-110 transition-transform">
-                  <CreditCard className="text-blue-400" size={20} />
-                </div>
-                <div className="text-left">
-                  <h3 className="text-sm font-black text-white uppercase italic tracking-tighter">Mi Billetera</h3>
-                  <p className="text-[10px] font-bold text-blue-400/70 uppercase tracking-widest">Cargar o Canjear Monedas</p>
-                </div>
-              </div>
-              <ExternalLink size={18} className="text-blue-400/50 group-hover:text-blue-400 transition-colors" />
-            </button>
-
-            {/* Withdrawal History Section */}
-            <div className="mt-8 space-y-4">
-              <div className="flex items-center gap-2 text-gray-400">
-                <History size={16} />
-                <h3 className="text-xs font-bold uppercase tracking-widest">Historial de Retiros</h3>
-              </div>
-              
-              <div className="max-h-60 space-y-2 overflow-y-auto pr-2 custom-scrollbar">
-                {withdrawalHistory.map((w) => (
-                  <div key={w.id} className="rounded-xl bg-white/5 p-3 border border-white/5">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] font-bold text-gray-500">{new Date(w.timestamp).toLocaleDateString()}</span>
-                      <span className={`text-[10px] font-bold uppercase ${w.status === 'completed' ? 'text-green-400' : 'text-blue-400'}`}>
-                        {w.status === 'completed' ? 'Completado' : 'Pendiente'}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1">
-                        <span className="text-sm font-black text-white">{w.amount}</span>
-                        <MonedasIcon size={12} />
-                      </div>
-                      {w.transactionId && (
-                        <div className="text-right">
-                          <p className="text-[8px] text-gray-500 uppercase">Comprobante</p>
-                          <p className="text-[10px] font-mono text-blue-400 font-bold">{w.transactionId}</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
-                {withdrawalHistory.length === 0 && (
-                  <p className="py-4 text-center text-[10px] text-gray-600 italic">No tienes retiros previos</p>
-                )}
-              </div>
-            </div>
-
-            {/* Danger Zone */}
-            <div className="mt-8 space-y-3 pt-6 border-t border-white/5">
-              <button
-                onClick={handleLogout}
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-gray-800 py-4 font-bold text-gray-300 transition-colors hover:bg-gray-700 hover:text-white"
+          <AnimatePresence mode="popLayout">
+            {profileMessage && (
+              <motion.div
+                key="profile-feedback-msg"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                className={`rounded-xl p-3 text-center text-xs font-bold ${profileMessage.type === 'success' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}
               >
-                <LogOut size={18} /> Cerrar Sesión
-              </button>
-              
-              <button
-                onClick={handleDeleteAccount}
-                disabled={isUpdatingProfile}
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-red-900/20 py-4 font-bold text-red-500 transition-colors hover:bg-red-900/40 disabled:opacity-50"
-              >
-                <Trash2 size={18} /> Desvincular Cuenta
-              </button>
-            </div>
+                {profileMessage.text}
+              </motion.div>
+            )}
+          </AnimatePresence>
           </div>
 
           <button
@@ -807,6 +1550,46 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 <p className="mt-4 text-[10px] text-gray-400 italic">Equivalente a ${user.monedas} ARS</p>
               </div>
 
+              {/* Withdrawal Form in Wallet */}
+              <div className="rounded-2xl bg-blue-500/5 p-4 border border-blue-500/20">
+                <div className="mb-4 flex items-center justify-between">
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-blue-400">Solicitar Retiro</label>
+                  <span className="text-[10px] text-gray-500 uppercase">Mín: 1.000</span>
+                </div>
+                
+                <div className="space-y-3">
+                  <div className="relative">
+                    <input 
+                      type="number"
+                      value={withdrawAmount || ''}
+                      onChange={(e) => {
+                        const val = e.target.value === '' ? 0 : parseInt(e.target.value);
+                        setWithdrawAmount(isNaN(val) ? 0 : Math.min(user.monedas, val));
+                      }}
+                      className="w-full rounded-xl bg-black/30 px-4 py-3 text-sm font-bold text-white outline-none focus:ring-2 focus:ring-blue-500/50"
+                      placeholder="Cantidad..."
+                    />
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-bold text-gray-500">
+                      MONEDAS
+                    </div>
+                  </div>
+                  <input 
+                    type="text"
+                    value={withdrawAlias}
+                    onChange={(e) => setWithdrawAlias(e.target.value)}
+                    className="w-full rounded-xl bg-black/30 px-4 py-3 text-sm font-bold text-white outline-none focus:ring-2 focus:ring-blue-500/50"
+                    placeholder="Alias o CBU..."
+                  />
+                  <button 
+                    onClick={handleWithdraw}
+                    disabled={isUpdatingProfile || withdrawAmount < 1000 || !withdrawAlias.trim()}
+                    className="w-full rounded-xl bg-blue-600 py-4 text-xs font-black uppercase tracking-tighter text-white hover:bg-blue-500 disabled:opacity-50"
+                  >
+                    Confirmar Retiro
+                  </button>
+                </div>
+              </div>
+
               {/* Points Exchange in Wallet */}
               <div className="space-y-4 pt-4 border-t border-white/5">
                 <div className="flex items-center gap-2 text-yellow-500">
@@ -817,9 +1600,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                   {[
                     { points: 1000, cost: 100 },
                     { points: 2000, cost: 175 }
-                  ].map((pkg) => (
+                  ].map((pkg, pIdx) => (
                     <button
-                      key={pkg.points}
+                      key={`exchange-pkg-v2-${pkg.points}-${pIdx}`}
                       onClick={() => handleExchangePoints(pkg.points, pkg.cost)}
                       disabled={user.monedas < pkg.cost}
                       className="group relative flex items-center justify-between rounded-2xl border border-white/5 bg-white/5 p-4 transition-all hover:bg-blue-600/20 hover:border-blue-500/50 disabled:opacity-30 active:scale-95"
@@ -852,9 +1635,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
               </div>
               
               <div className="grid grid-cols-2 gap-3">
-                {[150, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, 100000].map((amount) => (
+                {[150, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, 100000].map((amount, aIdx) => (
                   <button
-                    key={amount}
+                    key={`coin-package-v2-${amount}-${aIdx}`}
                     onClick={() => setSelectedCoinPackage(amount)}
                     className={`group relative flex flex-col items-center justify-center rounded-2xl border p-4 transition-all active:scale-95 ${
                       amount === 100000 
@@ -866,7 +1649,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       <MonedasIcon size={14} />
                       <span className="text-lg font-black text-white">{amount.toLocaleString()}</span>
                     </div>
-                    <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">${Math.round(amount * 1.074).toLocaleString()} ARS</span>
+                    <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">${Math.round(amount * 1.101).toLocaleString()} ARS</span>
                     
                     {amount === 100000 && (
                       <div className="mt-2 rounded-full bg-yellow-500 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest text-black">
@@ -891,16 +1674,58 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             </div>
           </div>
 
-          {/* Withdrawal History Section - Moved to bottom */}
-          <div className="mt-8 space-y-4 pt-8 border-t border-white/5">
-            <div className="flex items-center gap-2 text-gray-400">
-              <History size={18} />
-              <h3 className="text-xs font-bold uppercase tracking-widest">Historial de Retiros</h3>
-            </div>
-            
-            <div className="max-h-[300px] space-y-3 overflow-y-auto pr-2 custom-scrollbar">
-              {withdrawalHistory.map((w) => (
-                <div key={w.id} className="rounded-xl bg-white/5 p-4 border border-white/5 hover:bg-white/10 transition-colors">
+            {/* Withdrawal History Section - Moved to bottom */}
+            <div className="mt-8 space-y-8 pt-8 border-t border-white/5">
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 text-blue-400">
+                  <ShoppingBag size={18} />
+                  <h3 className="text-xs font-bold uppercase tracking-widest">Historial de Compras</h3>
+                </div>
+                
+                <div className="max-h-[250px] space-y-3 overflow-y-auto pr-2 custom-scrollbar">
+                  {purchaseHistory.map((p, pIdx) => (
+                    <div key={`wallet-purchase-history-v2-${p.id}-${pIdx}`} className="rounded-xl bg-green-500/5 p-4 border border-green-500/20 hover:bg-green-500/10 transition-colors">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[10px] font-bold text-gray-400">{p.timestamp ? new Date(p.timestamp.seconds * 1000).toLocaleDateString() : 'Reciente'}</span>
+                        <span className="rounded-full bg-green-500/20 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest text-green-400">
+                          Acreditado
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          {p.purchaseType === 'points' ? <GoldPointIcon size={16} /> : <MonedasIcon size={16} />}
+                          <span className="text-lg font-black text-white">+{p.amount.toLocaleString()}</span>
+                          <span className="text-[10px] text-gray-500 uppercase">{p.purchaseType || 'monedas'}</span>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-[8px] text-gray-500 uppercase">Referencia</p>
+                          <p className="text-[10px] font-mono text-gray-400 truncate max-w-[100px]">{p.id}</p>
+                        </div>
+                      </div>
+                      {p.pointsAdded > 0 && p.purchaseType !== 'points' && (
+                        <div className="mt-2 flex items-center gap-1 text-[10px] font-bold text-yellow-500">
+                          <GoldPointIcon size={10} /> +{p.pointsAdded.toLocaleString()} Puntos de bono
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {purchaseHistory.length === 0 && (
+                    <div className="flex flex-col items-center justify-center py-10 text-gray-500">
+                      <p className="text-xs font-bold uppercase tracking-widest opacity-30">Sin compras registradas</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 text-gray-400">
+                  <History size={18} />
+                  <h3 className="text-xs font-bold uppercase tracking-widest">Historial de Retiros</h3>
+                </div>
+                
+                <div className="max-h-[250px] space-y-3 overflow-y-auto pr-2 custom-scrollbar">
+              {withdrawalHistory.map((w, wIdx) => (
+                <div key={`wallet-withdraw-history-v2-${w.id}-${wIdx}`} className="rounded-xl bg-white/5 p-4 border border-white/5 hover:bg-white/10 transition-colors">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-[10px] font-bold text-gray-500">{new Date(w.timestamp).toLocaleDateString()}</span>
                     <span className={`rounded-full px-2 py-0.5 text-[8px] font-black uppercase tracking-widest ${w.status === 'completed' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'}`}>
@@ -956,7 +1781,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
           <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-2 custom-scrollbar">
             {topPlayers.map((player, index) => (
               <div 
-                key={player.id} 
+                key={`ranking-global-player-v2-${player.id}-${index}`} 
                 className={`flex items-center justify-between rounded-xl p-4 ${player.id === user.id ? 'bg-blue-600/20 border border-blue-500/30' : 'bg-gray-800/50'}`}
               >
                 <div className="flex items-center gap-4">
@@ -1069,7 +1894,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                   </div>
                   <div className="text-right">
                     <p className="text-xs font-bold uppercase tracking-widest text-gray-500">Total a Pagar</p>
-                    <p className="text-2xl font-black text-white">${Math.round(selectedCoinPackage * 1.074).toLocaleString()} ARS</p>
+                    <p className="text-2xl font-black text-white">${Math.round(selectedCoinPackage * 1.101).toLocaleString()} ARS</p>
                   </div>
                 </div>
 
@@ -1108,7 +1933,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
               </div>
 
               <button
-                onClick={() => handleCreatePreference(selectedCoinPackage, 'monedas', 0, Math.round(selectedCoinPackage * 1.074))}
+                onClick={() => handleCreatePreference(selectedCoinPackage, 'monedas', 0, Math.round(selectedCoinPackage * 1.101))}
                 disabled={isCreatingPreference}
                 className="w-full rounded-2xl bg-blue-600 py-4 text-lg font-black uppercase tracking-widest text-white transition-all hover:bg-blue-500 shadow-lg shadow-blue-600/20 disabled:opacity-50"
               >
@@ -1131,9 +1956,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             <button onClick={() => setView('main')} className="text-gray-400 hover:text-white">Cerrar</button>
           </div>
           <div className="grid grid-cols-3 gap-4 sm:grid-cols-4">
-            {ALL_SKINS.filter(s => user.ownedSkins.includes(s.id)).map(skin => (
+            {ALL_SKINS.filter(s => user.ownedSkins.includes(s.id)).map((skin, sIdx) => (
               <button
-                key={skin.id}
+                key={`inventory-owned-skin-${skin.id}-${sIdx}`}
                 onClick={() => handleEquip(skin.id)}
                 className={`group relative flex flex-col items-center rounded-2xl border-2 p-4 transition-all ${user.equippedSkin === skin.id ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-800 hover:border-gray-500'}`}
               >
@@ -1184,7 +2009,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 <h3 className="text-xl font-black uppercase tracking-widest text-white border-l-4 border-yellow-500 pl-4">Skins Disponibles</h3>
               </div>
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                {ALL_SKINS.filter(s => !user.ownedSkins.includes(s.id)).map(skin => {
+                {ALL_SKINS.filter(s => !user.ownedSkins.includes(s.id)).map((skin, sIdx) => {
                   let price = skin.price || (skin.rarity === 'legendary' ? 10000 : skin.rarity === 'epic' ? 5000 : skin.rarity === 'rare' ? 2500 : 1000);
                   const currency = skin.currency || 'coins';
                   const userBalance = currency === 'coins' ? user.coins : user.monedas;
@@ -1198,7 +2023,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                   
                   return (
                     <button
-                      key={skin.id}
+                      key={`shop-skin-available-${skin.id}-${sIdx}`}
                       onClick={() => handleBuy(skin, price)}
                       disabled={userBalance < price}
                       className={`group relative flex flex-col items-center rounded-2xl border-2 border-gray-700 bg-gray-800 p-4 transition-all hover:border-yellow-500 disabled:opacity-50`}
@@ -1231,9 +2056,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 {[
                   { points: 1000, cost: 100 },
                   { points: 2000, cost: 175 }
-                ].map((pkg) => (
+                ].map((pkg, pIdx) => (
                   <button
-                    key={pkg.points}
+                    key={`shop-exchange-pkg-v4-${pkg.points}-${pIdx}`}
                     onClick={() => handleExchangePoints(pkg.points, pkg.cost)}
                     disabled={user.monedas < pkg.cost}
                     className="group relative flex items-center justify-between rounded-2xl border border-white/5 bg-white/5 p-6 transition-all hover:bg-blue-600/20 hover:border-blue-500/50 disabled:opacity-30"
@@ -1390,7 +2215,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
 
                   return (
                     <button
-                      key={val}
+                      key={`arena-wager-option-${selectedCategory}-${val}-${idx}`}
                       onClick={() => {
                         if (isLocked) {
                           setTicketMessage({ text: `Debes comprar la entrada ${selectedCategory.toUpperCase()} en la tienda`, type: 'error' });
@@ -1696,12 +2521,86 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
           </motion.div>
         </div>
       )}
-      {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}
+      {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} adminUser={user} />}
 
       <AnimatePresence>
-        {showCreateConfirm && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
+        {selectedMedal && (
+          <div key="medal-detail-overlay" className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
             <motion.div
+              key={`medal-detail-modal-${selectedMedal.id}`}
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="w-full max-w-sm rounded-[2.5rem] bg-gray-900 p-8 border border-white/10 shadow-3xl text-center relative"
+            >
+              <button 
+                onClick={() => setSelectedMedal(null)}
+                className="absolute top-6 right-6 text-gray-500 hover:text-white transition-colors"
+              >
+                <X size={24} />
+              </button>
+
+              <div 
+                className={`mx-auto mb-6 flex h-24 w-24 items-center justify-center rounded-3xl bg-black/40 border-4 ${selectedMedal.unlocked ? 'animate-bounce-subtle' : 'grayscale opacity-30 shadow-none'}`}
+                style={{ 
+                  borderColor: selectedMedal.color,
+                  boxShadow: selectedMedal.unlocked ? `0 0 40px ${selectedMedal.color}22` : 'none'
+                }}
+              >
+                <div style={{ color: selectedMedal.color }}>
+                  {selectedMedal.icon && typeof selectedMedal.icon === 'object' && 'props' in selectedMedal.icon ? (
+                    (() => {
+                      const Icon = selectedMedal.icon.type;
+                      return <Icon size={48} {...selectedMedal.icon.props} />;
+                    })()
+                  ) : null }
+                </div>
+              </div>
+
+              <h3 className="text-2xl font-black italic tracking-tighter text-white uppercase mb-2">
+                {selectedMedal.name}
+              </h3>
+              
+              <div className="rounded-2xl bg-white/5 p-4 border border-white/5 mb-6">
+                <p className="text-sm font-bold text-gray-400 mb-4">
+                  {selectedMedal.desc}
+                </p>
+                
+                <div className="space-y-2">
+                  <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                    <span>Progreso</span>
+                    <span>{selectedMedal.current.toLocaleString()} / {selectedMedal.goal.toLocaleString()}</span>
+                  </div>
+                  <div className="h-2 w-full bg-black/40 rounded-full overflow-hidden border border-white/5">
+                    <motion.div 
+                      initial={{ width: 0 }}
+                      animate={{ width: `${Math.min(100, (selectedMedal.current / selectedMedal.goal) * 100)}%` }}
+                      className="h-full shadow-[0_0_10px_rgba(255,255,255,0.2)]"
+                      style={{ backgroundColor: selectedMedal.color }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className={`flex items-center justify-center gap-2 py-3 rounded-2xl font-black uppercase tracking-widest text-xs ${selectedMedal.unlocked ? 'bg-green-500/20 text-green-400' : 'bg-gray-800 text-gray-500'}`}>
+                {selectedMedal.unlocked ? (
+                  <>
+                    <ShieldCheck size={16} /> ¡DESBLOQUEADA!
+                  </>
+                ) : (
+                  <>
+                    <X size={16} /> BLOQUEADA
+                  </>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {showCreateConfirm && (
+          <div key="create-confirm-overlay" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
+            <motion.div
+              key={`create-confirm-modal-${showCreateConfirm.code}`}
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
@@ -1740,8 +2639,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
         )}
 
         {showJoinConfirm && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
+          <div key="join-confirm-overlay" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
             <motion.div
+              key={`join-confirm-modal-${showJoinConfirm.id}`}
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
@@ -1785,6 +2685,346 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             </motion.div>
           </div>
         )}
+
+        {selectedFriend && (
+          <div key="friend-detail-overlay" className="fixed inset-0 z-[70] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
+            <motion.div
+              key={`friend-detail-modal-${selectedFriend.id}`}
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="w-full max-w-md rounded-3xl border border-white/10 bg-gray-900 p-8 shadow-2xl"
+            >
+              <div className="mb-6 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="h-12 w-12 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 font-black text-2xl">
+                    {selectedFriend.displayName?.[0].toUpperCase()}
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black italic tracking-tighter text-white uppercase">{selectedFriend.displayName}</h3>
+                    <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest font-mono">Amigo</p>
+                  </div>
+                </div>
+                <button onClick={() => setSelectedFriend(null)} className="text-gray-500 hover:text-white">
+                  <X size={24} />
+                </button>
+              </div>
+
+              {(() => {
+                const friendship = friendships.find(f => f.uids.includes(selectedFriend.id));
+                if (!friendship) return null;
+
+                const gamesPlayed = friendship.gamesPlayed || 0;
+                const percentage = Math.min(100, (gamesPlayed / 2500) * 100);
+                const isTransferUnlocked = percentage >= 20;
+                const myWins = friendship.stats?.[user.id]?.wins || 0;
+                const friendWins = friendship.stats?.[selectedFriend.id]?.wins || 0;
+
+                return (
+                  <div className="space-y-6">
+                    {/* Friendship Progress */}
+                    <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Nivel de Amistad</span>
+                        <span className="text-sm font-black text-blue-400">{percentage.toFixed(1)}%</span>
+                      </div>
+                      <div className="h-3 w-full overflow-hidden rounded-full bg-gray-800">
+                        <motion.div 
+                          initial={{ width: 0 }}
+                          animate={{ width: `${percentage}%` }}
+                          className="h-full bg-gradient-to-r from-blue-600 to-blue-400"
+                        />
+                      </div>
+                      <p className="mt-2 text-[8px] text-center text-gray-500 uppercase tracking-widest">
+                        {gamesPlayed} / 2500 partidas jugadas juntos
+                      </p>
+                    </div>
+
+                    {/* Stats Grid */}
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="rounded-2xl bg-white/5 p-4 border border-white/5 text-center">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1">Tus Victorias</p>
+                        <span className="text-2xl font-black text-white">{myWins}</span>
+                      </div>
+                      <div className="rounded-2xl bg-white/5 p-4 border border-white/5 text-center">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1">Sus Victorias</p>
+                        <span className="text-2xl font-black text-white">{friendWins}</span>
+                      </div>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="space-y-3">
+                      <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
+                        <div className="mb-2 flex items-center justify-between">
+                          <label className="text-[10px] font-bold uppercase tracking-widest text-gray-400 font-mono">Apuesta del Duelo</label>
+                          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-blue-600/10 border border-blue-500/20">
+                            <MonedasIcon size={10} />
+                            <span className="text-[9px] font-black text-blue-400 uppercase tracking-tight">{user.monedas.toLocaleString()} Saldo</span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-xl bg-purple-600/10 border border-purple-500/20">
+                            <MonedasIcon size={20} />
+                          </div>
+                          <input 
+                            type="number"
+                            value={duelWager}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value);
+                              if (isNaN(val)) setDuelWager(0);
+                              else setDuelWager(Math.min(user.monedas, Math.max(0, val)));
+                            }}
+                            className="flex-1 rounded-xl bg-black/30 px-4 py-2 text-lg font-black text-white outline-none focus:ring-2 focus:ring-purple-500/50"
+                            placeholder="0 para modo amistoso"
+                          />
+                        </div>
+                        {duelWager === 0 && (
+                          <p className="mt-2 text-[8px] text-center font-bold text-blue-400 uppercase tracking-widest animate-pulse">
+                            ¡Modo Amistoso Activado!
+                          </p>
+                        )}
+                      </div>
+
+                      <button 
+                        onClick={() => {
+                          handleInviteFriend(selectedFriend.id, duelWager);
+                          setSelectedFriend(null);
+                        }}
+                        className="flex w-full items-center justify-center gap-3 rounded-xl bg-purple-600 py-4 font-black uppercase tracking-widest text-white hover:bg-purple-500 shadow-lg shadow-purple-600/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
+                      >
+                        <Zap size={18} className="fill-white" /> Invitar a Duelo
+                      </button>
+
+                      <button 
+                        onClick={() => {
+                          if (!isTransferUnlocked) {
+                            setProfileMessage({ text: 'Necesitas 20% de amistad para transferir', type: 'error' });
+                            setTimeout(() => setProfileMessage(null), 3000);
+                            return;
+                          }
+                          setShowTransferModal(true);
+                        }}
+                        className={`flex flex-col w-full items-center justify-center gap-0.5 rounded-xl py-3 font-black uppercase tracking-widest text-white transition-all ${isTransferUnlocked ? 'bg-blue-600 hover:bg-blue-500' : 'bg-gray-800 text-gray-500 cursor-not-allowed'}`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Send size={18} /> Transferir Fondos
+                          {!isTransferUnlocked && <ShieldCheck size={14} className="ml-1" />}
+                        </div>
+                        {!isTransferUnlocked && (
+                          <span className="text-[8px] font-normal lowercase opacity-40">
+                            disponible al alcanzar el 20% de amistad
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
+            </motion.div>
+          </div>
+        )}
+
+        {showTransferModal && selectedFriend && (
+          <div key="friend-transfer-overlay" className="fixed inset-0 z-[80] flex items-center justify-center bg-black/95 p-4 backdrop-blur-xl">
+            <motion.div
+              key={`friend-transfer-modal-${selectedFriend.id}`}
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="w-full max-w-sm rounded-3xl border border-blue-500/30 bg-gray-900 p-8 shadow-2xl"
+            >
+              <div className="mb-6 text-center">
+                <div className="mx-auto mb-4 h-16 w-16 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400">
+                  <Send size={32} />
+                </div>
+                <h3 className="text-xl font-black uppercase tracking-tighter text-white">Transferir a {selectedFriend.displayName}</h3>
+              </div>
+
+              <div className="space-y-6">
+                <div className="flex rounded-2xl bg-gray-800 p-1">
+                  <button
+                    onClick={() => setTransferCurrency('coins')}
+                    className={`flex-1 rounded-xl py-2 text-xs font-bold transition-all flex items-center justify-center gap-2 ${transferCurrency === 'coins' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                  >
+                    <GoldPointIcon size={14} /> Puntos
+                  </button>
+                  <button
+                    onClick={() => setTransferCurrency('monedas')}
+                    className={`flex-1 rounded-xl py-2 text-xs font-bold transition-all flex items-center justify-center gap-2 ${transferCurrency === 'monedas' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                  >
+                    <MonedasIcon size={14} /> Monedas
+                  </button>
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-[10px] font-bold uppercase tracking-widest text-gray-500">Monto a Enviar</label>
+                  <input 
+                    type="number"
+                    value={transferAmount || ''}
+                    onChange={(e) => setTransferAmount(parseInt(e.target.value) || 0)}
+                    className="w-full rounded-xl bg-black/40 px-4 py-4 text-2xl font-black text-white outline-none ring-1 ring-white/10 focus:ring-blue-500/50"
+                    placeholder="0"
+                  />
+                  <p className="mt-2 text-[10px] text-right text-gray-500 font-bold uppercase">
+                    Disponible: {transferCurrency === 'coins' ? user.coins : user.monedas}
+                  </p>
+                </div>
+
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => setShowTransferModal(false)}
+                    className="flex-1 rounded-xl bg-gray-800 py-4 font-bold text-gray-400 hover:bg-gray-700"
+                  >
+                    Cancelar
+                  </button>
+                  <button 
+                    onClick={() => handleTransfer(selectedFriend.id, transferAmount, transferCurrency)}
+                    disabled={transferAmount <= 0 || transferAmount > (transferCurrency === 'coins' ? user.coins : user.monedas)}
+                    className="flex-1 rounded-xl bg-blue-600 py-4 font-black uppercase tracking-widest text-white hover:bg-blue-500 disabled:opacity-50"
+                  >
+                    Enviar
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Notifications Overlay */}
+        <div className="fixed top-6 right-6 z-[100] flex flex-col gap-4 pointer-events-none">
+          <AnimatePresence>
+            {medalNotification && (
+              <motion.div
+                key={`menu-medal-unlock-toast-${medalNotification.id}`}
+                initial={{ x: 100, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: 100, opacity: 0 }}
+                className="w-80 rounded-2xl bg-gradient-to-br from-yellow-600/20 to-gray-900 border border-yellow-500/30 p-4 shadow-2xl backdrop-blur-xl pointer-events-auto"
+              >
+                <div className="flex items-center gap-4">
+                  <div className="rounded-full bg-yellow-500/20 p-2 text-yellow-500">
+                    <Award size={24} />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-black uppercase tracking-widest text-yellow-500">¡Medalla Desbloqueada!</h4>
+                    <p className="text-sm font-black text-white uppercase italic">{medalNotification.name}</p>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+            {notifications.map((notif, nIdx) => (
+              <motion.div
+                key={`menu-notif-v3-entry-${notif.id}-${nIdx}`}
+                initial={{ x: 100, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: 100, opacity: 0 }}
+                className="w-80 rounded-2xl bg-gray-900/95 p-4 border border-purple-500/30 shadow-2xl backdrop-blur-xl pointer-events-auto"
+              >
+                <div className="flex items-start gap-3">
+                  <div className="rounded-full bg-purple-500/20 p-2">
+                    <Zap className="text-purple-400" size={20} />
+                  </div>
+                  <div className="flex-1">
+                    <h4 className="text-sm font-black text-white uppercase italic tracking-tighter">¡Desafío Recibido!</h4>
+                    <p className="text-xs text-gray-400 mt-1">
+                      <span className="font-bold text-white">{notif.fromName}</span> te invita a un {notif.wager > 0 ? (
+                        <>duelo por <span className="font-bold text-yellow-500">{notif.wager} monedas</span></>
+                      ) : (
+                        <span className="font-bold text-blue-400">Duelo Amistoso</span>
+                      )}.
+                    </p>
+                    <div className="mt-4 flex gap-2">
+                      <button 
+                        onClick={async () => {
+                          if (user.monedas < (notif.wager || 0)) {
+                            setProfileMessage({ text: 'No tienes suficientes monedas para aceptar', type: 'error' });
+                            setTimeout(() => setProfileMessage(null), 3000);
+                            return;
+                          }
+                          try {
+                            await updateDoc(doc(db, 'notifications', notif.id), { status: 'accepted' });
+                            onStartWager(notif.wager || 0, 10, `private_${notif.roomId}`);
+                          } catch (e) {
+                            console.error('Error accepting invite:', e);
+                          }
+                        }}
+                        className="flex-1 rounded-lg bg-purple-600 py-2 text-[10px] font-black uppercase tracking-widest text-white hover:bg-purple-500"
+                      >
+                        Aceptar
+                      </button>
+                      <button 
+                        onClick={async () => {
+                          try {
+                            await updateDoc(doc(db, 'notifications', notif.id), { status: 'rejected' });
+                          } catch (e) {
+                            console.error('Error rejecting invite:', e);
+                          }
+                        }}
+                        className="flex-1 rounded-lg bg-gray-800 py-2 text-[10px] font-black uppercase tracking-widest text-gray-400 hover:bg-gray-700"
+                      >
+                        Rechazar
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>
+
+        {/* Username Modal */}
+        <AnimatePresence>
+          {showUsernameModal && (
+            <div key="username-modal-overlay" className="fixed inset-0 z-[200] flex items-center justify-center bg-black/95 p-4 backdrop-blur-2xl">
+              <motion.div
+                key="username-modal-content"
+                initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.9, opacity: 0, y: 20 }}
+                className="w-full max-w-md rounded-[40px] border border-blue-500/30 bg-gray-900 p-10 shadow-[0_0_100px_rgba(37,99,235,0.2)]"
+              >
+                <div className="mb-8 text-center">
+                  <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-blue-600/20 text-blue-400">
+                    <UserIcon size={40} />
+                  </div>
+                  <h2 className="text-3xl font-black italic tracking-tighter text-white uppercase">Tu Identidad Única</h2>
+                  <p className="mt-2 text-xs font-bold uppercase tracking-widest text-gray-500">Confirma tu nombre de usuario para continuar</p>
+                </div>
+
+                <div className="space-y-6">
+                  <div className="rounded-3xl bg-white/5 p-6 border border-white/5">
+                    <label className="mb-3 block text-[10px] font-bold uppercase tracking-widest text-blue-400">Nombre de Usuario</label>
+                    <input 
+                      type="text"
+                      value={tempUsername}
+                      onChange={(e) => setTempUsername(e.target.value)}
+                      className="w-full rounded-2xl bg-black/40 px-6 py-4 text-xl font-black text-white outline-none ring-2 ring-white/10 focus:ring-blue-500"
+                      placeholder="Ej: ElPro_44"
+                    />
+                    <p className="mt-3 text-[10px] text-gray-500 italic">
+                      * Este nombre será visible para tus amigos y en el ranking. Debe ser único.
+                    </p>
+                  </div>
+
+                  <button 
+                    onClick={handleConfirmUsername}
+                    disabled={isCheckingUsername || !tempUsername.trim()}
+                    className="group relative flex w-full items-center justify-center gap-3 overflow-hidden rounded-2xl bg-blue-600 py-5 text-lg font-black uppercase tracking-widest text-white transition-all hover:bg-blue-500 disabled:opacity-50"
+                  >
+                    {isCheckingUsername ? (
+                      <Loader2 className="animate-spin" size={24} />
+                    ) : (
+                      <>
+                        <span>Confirmar Identidad</span>
+                        <Check size={24} />
+                      </>
+                    )}
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
       </AnimatePresence>
     </div>
   </div>

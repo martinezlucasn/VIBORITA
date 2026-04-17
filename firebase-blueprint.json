@@ -117,6 +117,57 @@
         "color": { "type": "string" }
       },
       "required": ["x", "y", "value", "serverId", "expiresAt"]
+    },
+    "Friendship": {
+      "title": "Friendship",
+      "description": "Friendship between two users",
+      "type": "object",
+      "properties": {
+        "uids": { "type": "array", "items": { "type": "string" } },
+        "status": { "type": "string", "enum": ["pending", "accepted"] },
+        "requesterId": { "type": "string" },
+        "gamesPlayed": { "type": "number" },
+        "stats": { 
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "wins": { "type": "number" }
+            }
+          }
+        },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["uids", "status", "requesterId", "gamesPlayed", "timestamp"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Real-time notifications for game invites",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["game_invite"] },
+        "fromId": { "type": "string" },
+        "fromName": { "type": "string" },
+        "toId": { "type": "string" },
+        "roomId": { "type": "string" },
+        "wager": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "rejected"] },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["type", "fromId", "fromName", "toId", "status", "timestamp"]
+    },
+    "PrivateRoom": {
+      "title": "PrivateRoom",
+      "description": "Private game rooms for duels",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "creatorId": { "type": "string" },
+        "wager": { "type": "number" },
+        "createdAt": { "type": "number" },
+        "status": { "type": "string", "enum": ["open", "closed"] }
+      },
+      "required": ["id", "creatorId", "wager", "createdAt", "status"]
     }
   },
   "firestore": {
@@ -151,6 +202,18 @@
     "/ticketPurchases/{purchaseId}": {
       "schema": "TicketPurchase",
       "description": "Log of ticket purchases"
+    },
+    "/friendships/{friendshipId}": {
+      "schema": "Friendship",
+      "description": "Friendships and friend requests"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "User notifications"
+    },
+    "/privateRooms/{roomId}": {
+      "schema": "PrivateRoom",
+      "description": "Private game rooms"
     }
   }
 }

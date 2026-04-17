@@ -193,7 +193,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     const unsubCoins = onSnapshot(coinsQuery, (snapshot) => {
       const coins: Food[] = [];
       snapshot.forEach((doc) => {
-        coins.push({ id: doc.id, ...doc.data() } as Food);
+        coins.push({ ...doc.data(), id: doc.id } as Food);
       });
       droppedCoinsRef.current = coins;
     }, (e) => handleFirestoreError(e, OperationType.LIST, 'wagerCoins'));
@@ -478,6 +478,20 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
 
       await setDoc(statsRef, updatedStats);
       setCompetitionStats(myStats);
+
+      // Update Friendship stats if they are friends
+      const fQuery = query(collection(db, 'friendships'), where('uids', 'array-contains', user.id));
+      const fSnap = await getDocs(fQuery);
+      const friendshipDoc = fSnap.docs.find(d => d.data().uids.includes(opponentInfo.id));
+      
+      if (friendshipDoc) {
+        await updateDoc(friendshipDoc.ref, {
+          gamesPlayed: increment(1),
+          [`stats.${user.id}.wins`]: isWin ? increment(1) : increment(0),
+          [`stats.${opponentInfo.id}.wins`]: !isWin ? increment(1) : increment(0),
+          lastMatch: Date.now()
+        });
+      }
     } catch (error) {
       console.error("Error updating competition stats:", error);
     }
@@ -991,11 +1005,13 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
       />
-      <AnimatePresence>
+      <AnimatePresence mode="wait">
         {!isAlive && !isCollecting && !isWinner && (
           <motion.div
+            key="wager-death-overlay"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
             className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-md"
           >
             {category.startsWith('private_') && competitionStats ? (
@@ -1071,8 +1087,10 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
 
         {isWinner && (
           <motion.div
+            key="wager-win-overlay"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
             className="absolute inset-0 z-[110] flex items-center justify-center bg-black/80 backdrop-blur-xl"
           >
             {category.startsWith('private_') && competitionStats ? (
@@ -1183,12 +1201,15 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       </AnimatePresence>
 
       <div className="absolute bottom-8 left-1/2 flex -translate-x-1/2 gap-4">
-        {!isAlive && isCollecting && (
-          <motion.div
-            initial={{ scale: 0.8, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            className="flex flex-col items-center gap-4 rounded-3xl bg-green-900/90 p-8 text-center backdrop-blur-xl border border-green-500/30 shadow-[0_0_50px_rgba(34,197,94,0.2)]"
-          >
+        <AnimatePresence>
+          {!isAlive && isCollecting && (
+            <motion.div
+              key="wager-collect-overlay"
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              className="flex flex-col items-center gap-4 rounded-3xl bg-green-900/90 p-8 text-center backdrop-blur-xl border border-green-500/30 shadow-[0_0_50px_rgba(34,197,94,0.2)]"
+            >
             <div className="rounded-full bg-yellow-500 p-4 text-green-900">
               <Trophy size={48} />
             </div>
@@ -1212,6 +1233,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
             </button>
           </motion.div>
         )}
+        </AnimatePresence>
       </div>
 
       {/* Floating UI */}

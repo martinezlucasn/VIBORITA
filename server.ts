@@ -4,7 +4,7 @@ import { Server } from "socket.io";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
-import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
+import { MercadoPagoConfig, Preference, Payment, MerchantOrder } from 'mercadopago';
 import dotenv from 'dotenv';
 import admin from 'firebase-admin';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
@@ -89,11 +89,12 @@ async function startServer() {
     try {
       const preference = new Preference(client);
       
-      // Ensure notification_url is only set if we have a valid public host
-      const host = req.headers.host;
-      const isLocal = host?.includes('localhost') || host?.includes('127.0.0.1');
-      // Force HTTPS for Mercado Pago webhooks as they require it
-      const notificationUrl = isLocal ? undefined : `https://${host}/api/webhook`;
+      // Better notification_url logic for AI Studio / Proxies
+      const host = req.headers['x-forwarded-host'] || req.headers.host;
+      const proto = req.headers['x-forwarded-proto'] || 'https';
+      
+      const isLocal = typeof host === 'string' && (host.includes('localhost') || host.includes('127.0.0.1'));
+      const notificationUrl = isLocal ? undefined : `${proto}://${host}/api/webhook`;
 
       console.log(`Creating preference for user ${userId}, amount ${amount}, host: ${host}, url: ${notificationUrl}`);
 
@@ -118,13 +119,13 @@ async function startServer() {
             points_to_add: pointsAmount || 0
           },
           back_urls: {
-            success: `${req.headers.origin}/?payment=success`,
-            failure: `${req.headers.origin}/?payment=failure`,
-            pending: `${req.headers.origin}/?payment=pending`
+            success: `${proto}://${host}/?payment=success`,
+            failure: `${proto}://${host}/?payment=failure`,
+            pending: `${proto}://${host}/?payment=pending`
           },
           auto_return: 'approved',
           notification_url: notificationUrl,
-          external_reference: userId // Useful for tracking
+          external_reference: userId
         }
       });
 
@@ -136,14 +137,124 @@ async function startServer() {
     }
   });
 
+  async function processPayment(paymentId: string) {
+    if (!client) return { status: 'error', message: 'Client not initialized' };
+
+    try {
+      const payment = new Payment(client);
+      const data = await payment.get({ id: paymentId });
+
+      console.log(`Processing payment ${paymentId}: status=${data.status}`);
+
+      if (data.status === 'approved') {
+        const userId = data.metadata.user_id;
+        const amount = Number(data.metadata.coins_amount);
+        const purchaseType = data.metadata.purchase_type || 'monedas';
+        const pointsToAdd = Number(data.metadata.points_to_add || 0);
+
+        if (!userId) {
+          console.error("No userId in payment metadata");
+          return { status: 'error', message: 'No userId in metadata' };
+        }
+
+        // Check if already processed
+        const paymentRef = db.collection('processed_payments').doc(paymentId);
+        const paymentDoc = await paymentRef.get();
+
+        if (paymentDoc.exists) {
+          return { status: 'success', alreadyProcessed: true };
+        }
+
+        // Update Firestore User
+        const userRef = db.collection('users').doc(userId);
+        
+        await db.runTransaction(async (transaction) => {
+          const userDoc = await transaction.get(userRef);
+          const currentMonedas = userDoc.exists ? (userDoc.data()?.monedas || 0) : 0;
+          const currentCoins = userDoc.exists ? (userDoc.data()?.coins || 0) : 0;
+          
+          const updates: any = {};
+          if (purchaseType === 'points') {
+            updates.coins = currentCoins + pointsToAdd;
+          } else {
+            updates.monedas = currentMonedas + amount;
+            if (amount === 100000) updates.coins = currentCoins + 50000;
+          }
+
+          if (userDoc.exists) {
+            transaction.update(userRef, updates);
+          } else {
+            transaction.set(userRef, {
+              monedas: updates.monedas || 0,
+              coins: updates.coins || 0,
+              displayName: 'Player',
+              email: data.payer?.email || '',
+              lastActive: Date.now(),
+              ownedSkins: ['default'],
+              equippedSkin: 'default',
+              highScore: 0,
+              highScoreMonedas: 0
+            });
+          }
+
+          transaction.set(paymentRef, {
+            userId,
+            amount,
+            purchaseType,
+            pointsAdded: purchaseType === 'points' ? pointsToAdd : (amount === 100000 ? 50000 : 0),
+            timestamp: FieldValue.serverTimestamp(),
+            status: 'approved',
+            method: 'webhook_or_check'
+          });
+        });
+
+        // Update Supabase
+        try {
+          const { data: profile } = await supabase.from('profiles').select('monedas, coins').eq('id', userId).maybeSingle();
+          if (profile) {
+            const updates: any = {};
+            if (purchaseType === 'points') updates.coins = (profile.coins || 0) + pointsToAdd;
+            else {
+              updates.monedas = (profile.monedas || 0) + amount;
+              if (amount === 100000) updates.coins = (profile.coins || 0) + 50000;
+            }
+            await supabase.from('profiles').update(updates).eq('id', userId);
+          }
+          
+          // Log transactions
+          await supabase.from('transactions').insert({
+            user_id: userId,
+            type: 'received',
+            currency: purchaseType === 'points' ? 'coins' : 'monedas',
+            amount: purchaseType === 'points' ? pointsToAdd : amount,
+            reason: `mercado_pago_purchase: ${paymentId}`,
+            timestamp: new Date().toISOString()
+          });
+        } catch (e) { console.error("Supabase sync error:", e); }
+
+        return { status: 'success' };
+      }
+      return { status: 'pending', paymentStatus: data.status };
+    } catch (error) {
+      console.error(`Error in processPayment(${paymentId}):`, error);
+      return { status: 'error', error };
+    }
+  }
+
+  app.get("/api/check-payment/:id", async (req, res) => {
+    const { id } = req.params;
+    const result = await processPayment(id);
+    res.json(result);
+  });
+
   app.post("/api/webhook", async (req, res) => {
     const { query, body } = req;
     
-    // Mercado Pago sends topic/id in different places depending on the version
+    // Mercado Pago notification format can vary
     const topic = query.topic || query.type || body.type || body.action;
     const id = query.id || body.data?.id || body.id;
 
-    console.log(`Webhook received: topic=${topic}, id=${id}, action=${body.action}`);
+    console.log(`Webhook received: topic=${topic}, id=${id}`);
     
     // Log to Firestore for debugging
     try {
@@ -155,162 +266,28 @@ async function startServer() {
         timestamp: FieldValue.serverTimestamp()
       });
     } catch (e) {
-      console.error("Error logging webhook to Firestore:", e);
+      console.error("Error logging webhook:", e);
     }
 
-    const isPaymentEvent = topic === 'payment' || 
-                          topic === 'payment.updated' || 
-                          topic === 'payment.created' ||
-                          (typeof topic === 'string' && topic.includes('payment'));
-
-    if (isPaymentEvent && client && id) {
-      const paymentId = String(id);
-      
-      try {
-        const payment = new Payment(client);
-        const data = await payment.get({ id: paymentId });
-
-        console.log(`Payment data retrieved for ${paymentId}: status=${data.status}`);
-
-        if (data.status === 'approved') {
-          const userId = data.metadata.user_id;
-          const amount = Number(data.metadata.coins_amount);
-          const purchaseType = data.metadata.purchase_type || 'monedas';
-          const pointsToAdd = Number(data.metadata.points_to_add || 0);
-
-          if (!userId) {
-            console.error("No userId in payment metadata");
-            return res.sendStatus(200);
-          }
-
-          console.log(`Processing approved payment ${paymentId} for user ${userId}: ${amount} ${purchaseType}`);
+    if (client && id) {
+      if (topic === 'payment' || (typeof topic === 'string' && topic.includes('payment'))) {
+        await processPayment(String(id));
+      } else if (topic === 'merchant_order') {
+        try {
+          const order = new MerchantOrder(client);
+          const orderData = await order.get({ id: String(id) });
+          console.log(`Merchant order retrieved: ${id}, has ${orderData.payments?.length} payments`);
           
-          // 1. Check if this payment was already processed to prevent double crediting
-          const paymentRef = db.collection('processed_payments').doc(paymentId);
-          const paymentDoc = await paymentRef.get();
-
-          if (paymentDoc.exists) {
-            console.log(`Payment ${paymentId} already processed. Skipping.`);
-            return res.sendStatus(200);
-          }
-
-          // 2. Update Firestore User
-          const userRef = db.collection('users').doc(userId);
-          
-          try {
-            await db.runTransaction(async (transaction) => {
-              const userDoc = await transaction.get(userRef);
-              
-              const currentMonedas = userDoc.exists ? (userDoc.data()?.monedas || 0) : 0;
-              const currentCoins = userDoc.exists ? (userDoc.data()?.coins || 0) : 0;
-              
-              const updates: any = {};
-
-              if (purchaseType === 'points') {
-                updates.coins = currentCoins + pointsToAdd;
-              } else {
-                updates.monedas = currentMonedas + amount;
-                // If it's the 100k package, add the 50k points bonus
-                if (amount === 100000) {
-                  updates.coins = currentCoins + 50000;
-                }
+          if (orderData.payments) {
+            for (const p of orderData.payments) {
+              if (p.status === 'approved') {
+                await processPayment(String(p.id));
               }
-
-              if (userDoc.exists) {
-                transaction.update(userRef, updates);
-              } else {
-                // If user doesn't exist for some reason, create it (shouldn't happen but safe)
-                transaction.set(userRef, {
-                  monedas: updates.monedas || 0,
-                  coins: updates.coins || 0,
-                  displayName: 'Player',
-                  email: data.payer?.email || '',
-                  lastActive: Date.now(),
-                  ownedSkins: ['default'],
-                  equippedSkin: 'default',
-                  highScore: 0,
-                  highScoreMonedas: 0
-                }, { merge: true });
-              }
-
-              transaction.set(paymentRef, {
-                userId,
-                amount,
-                purchaseType,
-                pointsAdded: purchaseType === 'points' ? pointsToAdd : (amount === 100000 ? 50000 : 0),
-                timestamp: FieldValue.serverTimestamp(),
-                status: 'approved'
-              });
-            });
-          } catch (transactionError) {
-            console.error("Transaction failed:", transactionError);
-            throw transactionError;
-          }
-
-          // 3. Update Supabase Profile
-          try {
-            const { data: profile, error: profileError } = await supabase
-              .from('profiles')
-              .select('monedas, coins')
-              .eq('id', userId)
-              .maybeSingle(); // Use maybeSingle to avoid error if not found
-
-            if (profileError) {
-              console.error("Error fetching Supabase profile:", profileError);
-            } else if (profile) {
-              const updates: any = {};
-              if (purchaseType === 'points') {
-                updates.coins = (profile.coins || 0) + pointsToAdd;
-              } else {
-                updates.monedas = (profile.monedas || 0) + amount;
-                if (amount === 100000) {
-                  updates.coins = (profile.coins || 0) + 50000;
-                }
-              }
-
-              const { error: updateError } = await supabase
-                .from('profiles')
-                .update(updates)
-                .eq('id', userId);
-              
-              if (updateError) console.error("Error updating Supabase profile:", updateError);
-            } else {
-              console.warn(`Supabase profile not found for user ${userId}. Skipping Supabase update.`);
             }
-          } catch (supabaseErr) {
-            console.error("Supabase operation failed:", supabaseErr);
           }
-
-          // 4. Log Transaction in Supabase
-          try {
-            await supabase.from('transactions').insert({
-              user_id: userId,
-              type: 'received',
-              currency: purchaseType === 'points' ? 'coins' : 'monedas',
-              amount: purchaseType === 'points' ? pointsToAdd : amount,
-              reason: `mercado_pago_purchase: ${paymentId}`,
-              timestamp: new Date().toISOString()
-            });
-
-            if (purchaseType === 'monedas' && amount === 100000) {
-              await supabase.from('transactions').insert({
-                user_id: userId,
-                type: 'received',
-                currency: 'coins',
-                amount: 50000,
-                reason: `mercado_pago_bonus: ${paymentId}`,
-                timestamp: new Date().toISOString()
-              });
-            }
-          } catch (logErr) {
-            console.error("Error logging transaction to Supabase:", logErr);
-          }
-
-          console.log(`Successfully credited ${amount} ${purchaseType} to user ${userId}`);
+        } catch (e) {
+          console.error("Error processing merchant order:", e);
         }
-      } catch (error) {
-        console.error("Error processing webhook:", error);
-        return res.status(500).send("Internal Server Error");
       }
     }
 

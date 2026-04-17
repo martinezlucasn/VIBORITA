@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, FormEvent } from 'react';
 import { User, PlayerSession, Food, Point } from '../types';
 import { WORLD_W, WORLD_H, BASE_SPEED, CELL, ALL_SKINS, SEGMENT_DISTANCE } from '../constants';
 import { doc, setDoc, deleteDoc, onSnapshot, collection, query, where, serverTimestamp, addDoc, updateDoc, increment, orderBy, limit } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { db, handleFirestoreError, OperationType, auth } from '../firebase';
 import { motion, AnimatePresence } from 'motion/react';
 import { Trophy, Coins, ArrowLeft, Zap, LogOut, MessageSquare, Send, Users, X } from 'lucide-react';
 import { GoldPointIcon } from './Icons';
@@ -163,7 +163,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       const players: Record<string, PlayerSession> = {};
       snapshot.forEach((doc) => {
         if (doc.id !== user.id) {
-          players[doc.id] = { id: doc.id, ...doc.data() } as PlayerSession;
+          players[doc.id] = { ...doc.data(), id: doc.id } as PlayerSession;
         }
       });
       otherPlayersRef.current = players;
@@ -174,7 +174,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     const unsubFood = onSnapshot(foodQuery, (snapshot) => {
       const newFoods: Record<string, Food> = {};
       snapshot.forEach((doc) => {
-        newFoods[doc.id] = { id: doc.id, ...doc.data() } as Food;
+        newFoods[doc.id] = { ...doc.data(), id: doc.id } as Food;
       });
       foodsRef.current = newFoods;
 
@@ -204,7 +204,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     const unsubChat = onSnapshot(chatQuery, (snapshot) => {
       const msgs: ChatMessage[] = [];
       snapshot.forEach((doc) => {
-        msgs.push({ id: doc.id, ...doc.data() } as ChatMessage);
+        msgs.push({ ...doc.data(), id: doc.id } as ChatMessage);
       });
       setMessages(msgs.reverse());
     }, (e) => handleFirestoreError(e, OperationType.LIST, 'arenaChat'));
@@ -231,7 +231,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     const unsubKills = onSnapshot(killsQuery, (snapshot) => {
       const k: KillEvent[] = [];
       snapshot.forEach((doc) => {
-        k.push({ id: doc.id, ...doc.data() } as KillEvent);
+        k.push({ ...doc.data(), id: doc.id } as KillEvent);
       });
       setKills(k);
     }, (e) => handleFirestoreError(e, OperationType.LIST, 'arenaKills'));
@@ -269,8 +269,15 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         updatePlayer(dt);
         
         // Update local bots
-        botsRef.current.forEach(bot => {
-          if (bot.isAlive) updateBot(bot, dt);
+        botsRef.current.forEach((bot, idx) => {
+          if (bot.isAlive) {
+            updateBot(bot, dt);
+          } else {
+            // Respawn after 2 seconds if dead
+            if (Date.now() - bot.lastUpdate > 2000) {
+              botsRef.current[idx] = createBot(idx, serverId!);
+            }
+          }
         });
 
         checkCollisions();
@@ -581,32 +588,57 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       // Bot head vs Player body
       if (!isBotInvulnerable && !isPlayerInvulnerable) {
         const botHead = bot.segments[0];
-        playerRef.current.segments.forEach(seg => {
+        let hasCollided = false;
+
+        for (const seg of playerRef.current.segments) {
+          // Slightly larger hitbox for player body (CELL * 1.2) to make it easier to kill bots
           const d = Math.sqrt((botHead.x - seg.x) ** 2 + (botHead.y - seg.y) ** 2);
-          if (d < CELL) {
+          if (d < CELL * 1.2) {
             bot.isAlive = false;
-            // Drop food along segments
-            const segments = bot.segments;
-            const totalValue = Math.floor(bot.wager);
-            const valuePerSegment = Math.max(1, Math.floor(totalValue / segments.length));
+            bot.lastUpdate = Date.now(); // Mark death time
+            hasCollided = true;
             
-            // Drop food every 3 segments to avoid too many writes
-            for (let i = 0; i < segments.length; i += 3) {
-              const s = segments[i];
-              const val = valuePerSegment * 3;
-              if (val > 0) {
-                addDoc(collection(db, 'arenaFood'), {
-                  x: s.x,
-                  y: s.y,
-                  value: val,
-                  type: 'dropped',
-                  color: bot.color1,
-                  serverId
-                }).catch(() => {});
-              }
+            // Increment bot kills for the player
+            if (user?.id) {
+              const userRef = doc(db, 'users', user.id);
+              updateDoc(userRef, {
+                botKills: increment(1)
+              }).catch((e) => console.error("Error updating bot kills:", e));
+
+              // Add to kill feed for visual feedback
+              addDoc(collection(db, 'arenaKills'), {
+                killerName: user.displayName,
+                victimName: bot.displayName,
+                timestamp: Date.now(),
+                serverId
+              }).catch(() => {});
+            }
+            break;
+          }
+        }
+
+        if (hasCollided) {
+          // Drop food along segments
+          const segments = bot.segments;
+          const totalValue = Math.floor(bot.wager);
+          const valuePerSegment = Math.max(1, Math.floor(totalValue / segments.length));
+          
+          // Drop food every 3 segments to avoid too many writes
+          for (let i = 0; i < segments.length; i += 3) {
+            const s = segments[i];
+            const val = valuePerSegment * 3;
+            if (val > 0) {
+              addDoc(collection(db, 'arenaFood'), {
+                x: s.x,
+                y: s.y,
+                value: val,
+                type: 'dropped',
+                color: bot.color1,
+                serverId
+              }).catch(() => {});
             }
           }
-        });
+        }
       }
     });
 
@@ -804,8 +836,10 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     // Neon Border
     ctx.strokeStyle = '#00f2ff';
     ctx.lineWidth = 8;
-    ctx.shadowBlur = 15;
-    ctx.shadowColor = '#00f2ff';
+    if (!user.lightweight) {
+      ctx.shadowBlur = 15;
+      ctx.shadowColor = '#00f2ff';
+    }
     ctx.strokeRect(0, 0, WORLD_W, WORLD_H);
     ctx.shadowBlur = 0;
 
@@ -932,7 +966,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     const headRadius = 14; // Fixed radius for head
 
     // Aura (Visual Ability)
-    if (snake.hasAura) {
+    if (snake.hasAura && !user.lightweight) {
       ctx.save();
       const time = Date.now() / 1000;
       const auraPulse = Math.sin(time * 5) * 2;
@@ -973,8 +1007,10 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     }
 
     // Neon glow for the whole snake
-    ctx.shadowBlur = snake.isBoosting ? 20 + Math.random() * 10 : 10;
-    ctx.shadowColor = snake.isBoosting ? '#fff' : snake.color1;
+    if (!user.lightweight) {
+      ctx.shadowBlur = snake.isBoosting ? 20 + Math.random() * 10 : 10;
+      ctx.shadowColor = snake.isBoosting ? '#fff' : snake.color1;
+    }
 
     // Body segments (drawn from tail to head)
     for (let i = trail.length - 1; i >= pointsPerSegment; i -= pointsPerSegment) {
@@ -1141,7 +1177,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
             <span className="text-2xl font-black text-white">{score}</span>
           </div>
           <motion.div 
-            key={finalBalance || (user.coins + score)}
+            key="arena-score-display"
             initial={{ scale: 1 }}
             animate={{ scale: [1, 1.1, 1] }}
             className="flex items-center gap-2 rounded-xl bg-yellow-600/30 p-3 backdrop-blur-md border border-yellow-500/30"
@@ -1174,6 +1210,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         <AnimatePresence>
           {showChat && (
             <motion.div
+              key="arena-chat-container"
               initial={{ opacity: 0, y: 20, scale: 0.95 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 20, scale: 0.95 }}
@@ -1188,8 +1225,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
-                {messages.map((msg) => (
-                  <div key={msg.id} className="text-sm">
+                {messages.map((msg, mIdx) => (
+                  <div key={`arena-msg-v2-${msg.id}-${mIdx}`} className="text-sm">
                     <span className="font-bold text-blue-400">{msg.displayName}: </span>
                     <span className="text-gray-200">{msg.text}</span>
                   </div>
@@ -1223,10 +1260,10 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
 
       {/* Kill Feed */}
       <div className="pointer-events-none absolute right-4 top-20 flex flex-col items-end gap-2">
-        <AnimatePresence>
-          {kills.map((kill) => (
+        <AnimatePresence mode="popLayout">
+          {kills.map((kill, kIdx) => (
             <motion.div
-              key={kill.id}
+              key={`arena-kill-feed-v2-${kill.id}-${kIdx}`}
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: 20 }}
@@ -1255,12 +1292,15 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       )}
 
       <div className="absolute bottom-8 left-1/2 flex -translate-x-1/2 gap-4">
-        {!isAlive && !isCollecting && (
-          <motion.div
-            initial={{ scale: 0.8, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            className="flex flex-col items-center gap-4 rounded-3xl bg-red-900/90 p-8 text-center backdrop-blur-xl"
-          >
+        <AnimatePresence mode="wait">
+          {!isAlive && !isCollecting && (
+            <motion.div
+              key="arena-death-overlay"
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              className="flex flex-col items-center gap-4 rounded-3xl bg-red-900/90 p-8 text-center backdrop-blur-xl"
+            >
             <h2 className="text-4xl font-black text-white uppercase italic tracking-tighter">HAS MUERTO</h2>
             <div className="flex flex-col gap-1">
               <p className="text-red-200">Perdiste tu apuesta de {wager}</p>
@@ -1279,12 +1319,14 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
           </motion.div>
         )}
 
-        {!isAlive && isCollecting && (
-          <motion.div
-            initial={{ scale: 0.8, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            className="flex flex-col items-center gap-4 rounded-3xl bg-green-900/90 p-8 text-center backdrop-blur-xl border border-green-500/30 shadow-[0_0_50px_rgba(34,197,94,0.2)]"
-          >
+          {!isAlive && isCollecting && (
+            <motion.div
+              key="arena-collect-win-overlay"
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              className="flex flex-col items-center gap-4 rounded-3xl bg-green-900/90 p-8 text-center backdrop-blur-xl border border-green-500/30 shadow-[0_0_50px_rgba(34,197,94,0.2)]"
+            >
             <div className="rounded-full bg-yellow-500 p-4 text-green-900">
               <Trophy size={48} />
             </div>
@@ -1331,6 +1373,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
             </button>
           </motion.div>
         )}
+        </AnimatePresence>
       </div>
     </div>
   );

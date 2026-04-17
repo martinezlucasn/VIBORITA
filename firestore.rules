@@ -69,7 +69,7 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() &&
-        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'user') == 'admin' ||
           (request.auth.token.email == "martinezlucasn@gmail.com" && request.auth.token.email_verified == true));
     }
 
@@ -79,7 +79,7 @@ service cloud.firestore {
              data.email is string &&
              data.displayName is string &&
              data.amount is number &&
-             data.amount > 0 &&
+             data.amount >= 1000 &&
              data.alias is string &&
              data.status in ['pending', 'completed', 'rejected'] &&
              data.timestamp is number;
@@ -87,7 +87,7 @@ service cloud.firestore {
 
     function isValidUser(data) {
       let requiredFields = ['displayName', 'coins', 'lastActive'];
-      let optionalFields = ['id', 'email', 'ownedSkins', 'equippedSkin', 'highScore', 'highScoreMonedas', 'monedas', 'role', 'proAccessUntil', 'millonarioAccessUntil'];
+      let optionalFields = ['id', 'email', 'ownedSkins', 'equippedSkin', 'highScore', 'highScoreMonedas', 'monedas', 'role', 'proAccessUntil', 'millonarioAccessUntil', 'usernameSet', 'botKills', 'insomniaCount'];
       return data.keys().hasAll(requiredFields) &&
              data.keys().hasOnly(requiredFields.concat(optionalFields)) &&
              data.displayName is string &&
@@ -103,7 +103,10 @@ service cloud.firestore {
              (!('ownedSkins' in data) || data.ownedSkins is list) &&
              (!('role' in data) || data.role is string) &&
              (!('proAccessUntil' in data) || data.proAccessUntil is number) &&
-             (!('millonarioAccessUntil' in data) || data.millonarioAccessUntil is number);
+             (!('millonarioAccessUntil' in data) || data.millonarioAccessUntil is number) &&
+             (!('usernameSet' in data) || data.usernameSet is bool) &&
+             (!('botKills' in data) || data.botKills is number) &&
+             (!('insomniaCount' in data) || data.insomniaCount is number);
     }
 
     function isValidTicketPurchase(data) {
@@ -178,6 +181,46 @@ service cloud.firestore {
              data.status in ['open', 'closed'];
     }
 
+    function isValidCompetitionStats(data) {
+      return data is map;
+    }
+
+    function isValidFriendship(data) {
+      return data.keys().hasAll(['uids', 'status', 'requesterId', 'gamesPlayed', 'timestamp']) &&
+             data.uids is list &&
+             data.uids.size() == 2 &&
+             data.status in ['pending', 'accepted'] &&
+             data.requesterId is string &&
+             data.gamesPlayed is number &&
+             data.timestamp is number &&
+             (!('stats' in data) || data.stats is map) &&
+             (!('lastMatch' in data) || data.lastMatch is number);
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['type', 'fromId', 'fromName', 'toId', 'status', 'timestamp']) &&
+             data.type in ['game_invite'] &&
+             data.fromId is string &&
+             data.fromName is string &&
+             data.toId is string &&
+             data.status in ['pending', 'accepted', 'rejected'] &&
+             data.timestamp is number &&
+             (!('roomId' in data) || data.roomId is string) &&
+             (!('wager' in data) || data.wager is number);
+    }
+
+    function isValidWebhookLog(data) {
+      return data.keys().hasAll(['timestamp']) &&
+             data.timestamp is timestamp;
+    }
+
+    function isValidProcessedPayment(data) {
+      return data.keys().hasAll(['userId', 'amount', 'timestamp']) &&
+             data.userId is string &&
+             data.amount is number &&
+             data.timestamp is timestamp;
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -245,6 +288,34 @@ service cloud.firestore {
       allow create: if isAuthenticated() && isValidPrivateRoom(request.resource.data) && request.resource.data.creatorId == request.auth.uid;
       allow update: if isAuthenticated() && isValidPrivateRoom(request.resource.data) && (resource.data.creatorId == request.auth.uid || isAdmin());
       allow delete: if isAuthenticated();
+    }
+
+    match /friendships/{friendshipId} {
+      allow read: if isAuthenticated() && (request.auth.uid in resource.data.uids);
+      allow create: if isAuthenticated() && isValidFriendship(request.resource.data) && (request.auth.uid in request.resource.data.uids);
+      allow update: if isAuthenticated() && isValidFriendship(request.resource.data) && (request.auth.uid in resource.data.uids);
+      allow delete: if isAuthenticated() && (request.auth.uid in resource.data.uids);
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && (resource.data.toId == request.auth.uid || resource.data.fromId == request.auth.uid);
+      allow create: if isAuthenticated() && isValidNotification(request.resource.data) && request.resource.data.fromId == request.auth.uid;
+      allow update: if isAuthenticated() && (resource.data.toId == request.auth.uid || resource.data.fromId == request.auth.uid);
+      allow delete: if isAuthenticated() && (resource.data.toId == request.auth.uid || resource.data.fromId == request.auth.uid);
+    }
+
+    match /competitionStats/{statsId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    match /webhook_logs/{logId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /processed_payments/{paymentId} {
+      allow read: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow write: if isAdmin();
     }
   }
 }

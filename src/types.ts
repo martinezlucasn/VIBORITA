@@ -14,8 +14,13 @@ export interface User {
   highScore: number;
   highScoreMonedas: number;
   lastActive: number;
+  usernameSet?: boolean;
   proAccessUntil?: number;
   millonarioAccessUntil?: number;
+  botKills?: number;
+  insomniaCount?: number;
+  photoURL?: string;
+  lightweight?: boolean;
 }
 
 export interface PlayerSession {
@@ -74,4 +79,30 @@ export interface KillEvent {
   victimName: string;
   timestamp: number;
   serverId?: string;
+}
+
+export interface Friendship {
+  id: string;
+  uids: string[];
+  status: 'pending' | 'accepted';
+  requesterId: string;
+  gamesPlayed: number;
+  stats: {
+    [uid: string]: {
+      wins: number;
+    };
+  };
+  timestamp: number;
+}
+
+export interface Notification {
+  id: string;
+  type: 'game_invite';
+  fromId: string;
+  fromName: string;
+  toId: string;
+  roomId?: string;
+  wager?: number;
+  status: 'pending' | 'accepted' | 'rejected';
+  timestamp: number;
 }

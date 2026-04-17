@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { StatusBar } from '@capacitor/status-bar';
 import { Capacitor } from '@capacitor/core';
-import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
+import { onAuthStateChanged, signInWithPopup, signInWithRedirect, GoogleAuthProvider, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc, onSnapshot, updateDoc, increment } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
 import { supabase } from './lib/supabase';
@@ -63,7 +63,7 @@ export default function App() {
         const unsubUser = onSnapshot(userDocRef, async (docSnap) => {
           if (docSnap.exists()) {
             const userData = docSnap.data() as User;
-            setUser({ id: docSnap.id, email: firebaseUser.email || '', ...userData } as User);
+            setUser({ ...userData, id: docSnap.id, email: firebaseUser.email || '' } as User);
             
             // Sync with Supabase (Firestore is the source of truth)
             await supabase.from('profiles').upsert({
@@ -91,13 +91,15 @@ export default function App() {
               const newUser: User = {
                 id: firebaseUser.uid,
                 displayName: firebaseUser.displayName || 'Player',
-                email: firebaseUser.email || '',
+                email: (firebaseUser.email || '').toLowerCase(),
                 coins: 0,
                 monedas: 0,
+                botKills: 0,
+                insomniaCount: 0,
+                highScoreMonedas: 0,
                 ownedSkins: ['default'],
                 equippedSkin: 'default',
                 highScore: 0,
-                highScoreMonedas: 0,
                 lastActive: Date.now()
               };
               
@@ -110,7 +112,7 @@ export default function App() {
                   await supabase.from('profiles').upsert({
                     id: firebaseUser.uid,
                     display_name: newUser.displayName,
-                    email: newUser.email,
+                    email: newUser.email.toLowerCase(),
                     coins: newUser.coins,
                     monedas: newUser.monedas,
                     equipped_skin: newUser.equippedSkin,
@@ -154,7 +156,12 @@ export default function App() {
   const handleLogin = async () => {
     const provider = new GoogleAuthProvider();
     try {
-      await signInWithPopup(auth, provider);
+      if (Capacitor.isNativePlatform()) {
+        // Use redirect for native platforms to avoid popup issues
+        await signInWithRedirect(auth, provider);
+      } else {
+        await signInWithPopup(auth, provider);
+      }
     } catch (error) {
       console.error('Login error:', error);
     }
@@ -316,8 +323,9 @@ export default function App() {
 
         <AnimatePresence>
           {showTerms && (
-            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
+            <div key="terms-overlay" className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
               <motion.div
+                key="terms-modal"
                 initial={{ scale: 0.9, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 exit={{ scale: 0.9, opacity: 0 }}
@@ -398,6 +406,7 @@ export default function App() {
       <AnimatePresence>
         {quotaExceeded && (
           <motion.div
+            key="quota-exhausted-alert"
             initial={{ y: -100 }}
             animate={{ y: 0 }}
             exit={{ y: -100 }}
