@@ -19,8 +19,6 @@ export interface User {
   millonarioAccessUntil?: number;
   botKills?: number;
   insomniaCount?: number;
-  photoURL?: string;
-  lightweight?: boolean;
 }
 
 export interface PlayerSession {

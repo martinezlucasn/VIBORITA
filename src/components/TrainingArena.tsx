@@ -333,9 +333,8 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
       if (!isBotInvulnerable && !isPlayerInvulnerable) {
         const botHead = bot.segments[0];
         playerRef.current.segments.forEach(seg => {
-          // Use 1.2 * CELL for more consistent collision (same as Arena.tsx)
           const d = Math.sqrt((botHead.x - seg.x) ** 2 + (botHead.y - seg.y) ** 2);
-          if (d < CELL * 1.2) {
+          if (d < CELL) {
             bot.isAlive = false;
             
             // Increment bot kills for the player
@@ -594,7 +593,7 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     const headRadius = 14; // Fixed radius for head
 
     // Aura (Visual Ability)
-    if (snake.hasAura && !user.lightweight) {
+    if (snake.hasAura) {
       ctx.save();
       const time = Date.now() / 1000;
       const auraPulse = Math.sin(time * 5) * 2;
@@ -635,10 +634,8 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     }
 
     // Neon glow for the whole snake
-    if (!user.lightweight) {
-      ctx.shadowBlur = snake.isBoosting ? 20 + Math.random() * 10 : 10;
-      ctx.shadowColor = snake.isBoosting ? '#fff' : snake.color1;
-    }
+    ctx.shadowBlur = snake.isBoosting ? 20 + Math.random() * 10 : 10;
+    ctx.shadowColor = snake.isBoosting ? '#fff' : snake.color1;
 
     for (let i = trail.length - 1; i >= pointsPerSegment; i -= pointsPerSegment) {
       const segmentIndex = Math.floor(i / pointsPerSegment);
@@ -791,15 +788,12 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
       )}
 
       <div className="absolute bottom-8 left-1/2 flex -translate-x-1/2 gap-4">
-        <AnimatePresence mode="wait">
-          {!isAlive && !isCollecting && (
-            <motion.div
-              key="training-death-overlay"
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.8, opacity: 0 }}
-              className="flex flex-col items-center gap-4 rounded-3xl bg-gray-900/90 p-8 text-center backdrop-blur-xl border border-gray-700"
-            >
+        {!isAlive && !isCollecting && (
+          <motion.div
+            initial={{ scale: 0.8, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="flex flex-col items-center gap-4 rounded-3xl bg-gray-900/90 p-8 text-center backdrop-blur-xl border border-gray-700"
+          >
             <h2 className="text-4xl font-black text-white uppercase italic tracking-tighter">PUNTOS TERMINADO</h2>
             <p className="text-gray-400">Puntuación alcanzada: {score}</p>
             <button
@@ -811,14 +805,12 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
           </motion.div>
         )}
 
-          {!isAlive && isCollecting && (
-            <motion.div
-              key="training-collect-overlay"
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.8, opacity: 0 }}
-              className="flex flex-col items-center gap-4 rounded-3xl bg-green-900/90 p-8 text-center backdrop-blur-xl border border-green-500/30 shadow-[0_0_50px_rgba(34,197,94,0.2)]"
-            >
+        {!isAlive && isCollecting && (
+          <motion.div
+            initial={{ scale: 0.8, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="flex flex-col items-center gap-4 rounded-3xl bg-green-900/90 p-8 text-center backdrop-blur-xl border border-green-500/30 shadow-[0_0_50px_rgba(34,197,94,0.2)]"
+          >
             <div className="rounded-full bg-yellow-500 p-4 text-green-900">
               <Trophy size={48} />
             </div>
@@ -842,7 +834,6 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
             </button>
           </motion.div>
         )}
-        </AnimatePresence>
       </div>
     </div>
   );

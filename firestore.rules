@@ -314,8 +314,7 @@ service cloud.firestore {
     }
 
     match /processed_payments/{paymentId} {
-      allow read: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
-      allow write: if isAdmin();
+      allow read, write: if isAdmin();
     }
   }
 }

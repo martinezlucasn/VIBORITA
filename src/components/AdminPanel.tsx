@@ -44,7 +44,7 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
     const unsubUsers = onSnapshot(qUsers, (snapshot) => {
       const fetchedUsersMap = new Map<string, User>();
       snapshot.forEach(doc => {
-        fetchedUsersMap.set(doc.id, { ...doc.data(), id: doc.id } as User);
+        fetchedUsersMap.set(doc.id, { id: doc.id, ...doc.data() } as User);
       });
       setUsers(Array.from(fetchedUsersMap.values()));
       setLoading(false);
@@ -55,33 +55,36 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
 
     const qWithdrawals = query(collection(db, 'withdrawals'), orderBy('timestamp', 'desc'));
     const unsubWithdrawals = onSnapshot(qWithdrawals, (snapshot) => {
-      const withdrawalsMap = new Map<string, WithdrawalRequest>();
-      snapshot.forEach(doc => {
-        withdrawalsMap.set(doc.id, { ...doc.data(), id: doc.id } as WithdrawalRequest);
-      });
-      setWithdrawals(Array.from(withdrawalsMap.values()));
+      const items = snapshot.docs.map(doc => ({ 
+        firestoreId: doc.id, 
+        id: doc.id,
+        ...doc.data() 
+      }));
+      setWithdrawals(items as any);
     }, (e) => {
       handleFirestoreError(e, OperationType.LIST, 'withdrawals');
     });
 
     const qWebhooks = query(collection(db, 'webhook_logs'), orderBy('timestamp', 'desc'), limit(50));
     const unsubWebhooks = onSnapshot(qWebhooks, (snapshot) => {
-      const webhooksMap = new Map<string, any>();
-      snapshot.forEach(doc => {
-        webhooksMap.set(doc.id, { ...doc.data(), id: doc.id });
-      });
-      setWebhooks(Array.from(webhooksMap.values()));
+      const logs = snapshot.docs.map(doc => ({ 
+        firestoreId: doc.id, 
+        uid: doc.id,
+        ...doc.data() 
+      }));
+      setWebhooks(logs);
     }, (e) => {
       console.error("Error fetching webhooks:", e);
     });
 
     const qPayments = query(collection(db, 'processed_payments'), orderBy('timestamp', 'desc'), limit(50));
     const unsubPayments = onSnapshot(qPayments, (snapshot) => {
-      const paymentsMap = new Map<string, any>();
-      snapshot.forEach(doc => {
-        paymentsMap.set(doc.id, { ...doc.data(), id: doc.id });
-      });
-      setProcessedPayments(Array.from(paymentsMap.values()));
+      const payments = snapshot.docs.map(doc => ({ 
+        firestoreId: doc.id, 
+        uid: doc.id,
+        ...doc.data() 
+      }));
+      setProcessedPayments(payments);
     }, (e) => {
       console.error("Error fetching processed payments:", e);
     });
@@ -239,10 +242,9 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
             </button>
           </div>
 
-          <AnimatePresence mode="wait">
+          <AnimatePresence>
             {message && (
               <motion.div
-                key="admin-status-message"
                 initial={{ opacity: 0, y: -10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -10 }}
@@ -256,8 +258,8 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
           <div className="h-full overflow-y-auto pr-2 custom-scrollbar">
             {activeTab === 'users' ? (
               <div className="space-y-2">
-                {filteredUsers.map((u, uIdx) => (
-                  <div key={`admin-user-profile-v3-${u.id}-${uIdx}`} className="flex items-center gap-4 rounded-xl bg-gray-800/40 p-3 border border-white/5 hover:border-white/10 transition-colors">
+                {filteredUsers.map((u, idx) => (
+                  <div key={`admin-u-${u.id}-${idx}`} className="flex items-center gap-4 rounded-xl bg-gray-800/40 p-3 border border-white/5 hover:border-white/10 transition-colors">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <h3 className="text-sm font-black text-white truncate">{u.displayName}</h3>
@@ -345,9 +347,9 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
             ) : activeTab === 'withdrawals' ? (
               <div className="space-y-3">
                 <div className="flex gap-2 mb-4">
-                  {(['all', 'pending', 'completed'] as const).map((f, fIdx) => (
+                  {(['all', 'pending', 'completed'] as const).map((f) => (
                     <button
-                      key={`admin-withdraw-filter-${f}-${fIdx}`}
+                      key={f}
                       onClick={() => setWithdrawalFilter(f)}
                       className={`rounded-xl px-4 py-2 text-[10px] font-black uppercase tracking-widest transition-all ${
                         withdrawalFilter === f 
@@ -366,8 +368,8 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                     w.alias.toLowerCase().includes(search.toLowerCase());
                   const matchesFilter = withdrawalFilter === 'all' || w.status === withdrawalFilter;
                   return matchesSearch && matchesFilter;
-                }).map((w, wIdx) => (
-                  <div key={`admin-withdrawal-req-v3-${w.id}-${wIdx}`} className={`rounded-2xl border p-4 transition-all ${w.status === 'pending' ? 'border-blue-500/30 bg-blue-500/5' : 'border-white/5 bg-gray-800/40'}`}>
+                }).map((w: any, idx) => (
+                  <div key={`admin-withdraw-${w.firestoreId || idx}`} className={`rounded-2xl border p-4 transition-all ${w.status === 'pending' ? 'border-blue-500/30 bg-blue-500/5' : 'border-white/5 bg-gray-800/40'}`}>
                     <div className="mb-4 flex items-start justify-between">
                       <div>
                         <div className="flex items-center gap-2">
@@ -438,8 +440,8 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                     Pagos procesados y acreditados exitosamente a través del Webhook.
                   </p>
                 </div>
-                {processedPayments.map((p, pIdx) => (
-                  <div key={`admin-processed-payment-v3-${p.id}-${pIdx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
+                {processedPayments.map((p, idx) => (
+                  <div key={`admin-paid-${p.firestoreId || p.id || idx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
                         <span className="rounded-full bg-green-500/20 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-green-400">
@@ -479,8 +481,8 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                     Aquí se muestran los últimos 50 eventos de Mercado Pago. Útil para verificar si las notificaciones están llegando al servidor.
                   </p>
                 </div>
-                {webhooks.map((w, wIdx) => (
-                  <div key={`admin-webhook-log-v2-${w.id}-${wIdx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
+                {webhooks.map((w, idx) => (
+                  <div key={`admin-hook-${w.firestoreId || idx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
                     <div className="flex items-center justify-between mb-2">
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${w.topic === 'payment' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'}`}>
                         {w.topic || 'Desconocido'}
@@ -508,9 +510,8 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
         {/* Withdrawal Detail Modal */}
         <AnimatePresence>
           {selectedWithdrawal && (
-            <div key="withdrawal-modal-overlay" className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+            <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
               <motion.div 
-                key={`withdrawal-detail-${selectedWithdrawal.id}`}
                 initial={{ scale: 0.9, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 exit={{ scale: 0.9, opacity: 0 }}

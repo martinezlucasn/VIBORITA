@@ -1,20 +1,11 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore, getDocFromServer, doc } from 'firebase/firestore';
-import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-let storageInstance: any = null;
-try {
-  storageInstance = getStorage(app);
-} catch (error) {
-  console.warn("Firebase Storage is not available. Please ensure it's enabled in your Firebase Console.", error);
-}
-
-export const storage = storageInstance;
 
 async function testConnection() {
   try {
