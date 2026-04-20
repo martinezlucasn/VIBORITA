@@ -35,6 +35,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
   const [onlineCount, setOnlineCount] = useState(0);
   const [serverId, setServerId] = useState<string | null>(null);
   const [kills, setKills] = useState<KillEvent[]>([]);
+  const [paymentNotice, setPaymentNotice] = useState<{ id: string; status: string; amount: number } | null>(null);
   const [finalBalance, setFinalBalance] = useState<number | null>(null);
   const [showCancel, setShowCancel] = useState(false);
   const socketRef = useRef<Socket | null>(null);
@@ -89,6 +90,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         // Use a prefix for the serverId based on category to separate players
         const categoryServerId = `basica_${id}`;
         socket.emit("join_arena", {
+          id: user.id,
           displayName: user.displayName,
           equippedSkin: user.equippedSkin,
           hasAura: playerRef.current.hasAura,
@@ -96,6 +98,12 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
           serverId: categoryServerId,
           wager: 0
         });
+      });
+
+      socket.on("payment_status_update", (data) => {
+        console.log("Status de pago actualizado:", data);
+        setPaymentNotice(data);
+        setTimeout(() => setPaymentNotice(null), 8000); // Auto close after 8s
       });
 
       socket.on("joined_room", ({ roomId }) => {
@@ -1327,6 +1335,53 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
           )}
         </div>
       </div>
+
+      {/* Payment Notification Overlay */}
+      <AnimatePresence>
+        {paymentNotice && (
+          <motion.div
+            initial={{ opacity: 0, x: 50, scale: 0.8 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.5 }}
+            className="fixed bottom-24 right-6 z-[60] flex max-w-sm flex-col gap-2 rounded-2xl border border-blue-500/30 bg-gray-900/90 p-4 shadow-2xl backdrop-blur-md pointer-events-auto"
+          >
+            <div className="flex items-center gap-3">
+              <div className={`rounded-full p-2 ${paymentNotice.status === 'approved' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+                {paymentNotice.status === 'approved' ? <Trophy size={20} /> : <Zap size={20} />}
+              </div>
+              <div className="flex-1">
+                <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Notificación de Pago</p>
+                <h4 className="text-sm font-black text-white">
+                  {paymentNotice.status === 'approved' ? '¡Pago Acreditado!' : 'Pago en Proceso...'}
+                </h4>
+              </div>
+              <button 
+                onClick={() => setPaymentNotice(null)}
+                className="text-gray-500 hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            
+            <div className="mt-2 rounded-xl bg-black/30 p-3">
+              <p className="text-[10px] font-bold text-gray-500 uppercase leading-tight">
+                {paymentNotice.status === 'approved' 
+                  ? 'Se han acreditado las monedas en tu cuenta exitosamente.' 
+                  : 'Mercado Pago ha recibido tu solicitud. El saldo se acreditará automáticamente cuando se confirme el pago (puede tardar unos minutos).'}
+              </p>
+              <div className="mt-2 flex items-center justify-between border-t border-white/5 pt-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg font-black text-white">+{paymentNotice.amount}</span>
+                  <Coins className="text-yellow-500" size={16} />
+                </div>
+                <span className={`text-[10px] font-bold uppercase ${paymentNotice.status === 'approved' ? 'text-green-500' : 'text-yellow-500'}`}>
+                  {paymentNotice.status.toUpperCase()}
+                </span>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Active Powerups UI */}
       <div className="pointer-events-none absolute left-4 top-40 flex flex-col gap-2">

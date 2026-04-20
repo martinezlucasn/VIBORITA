@@ -454,17 +454,17 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
               </div>
             ) : activeTab === 'payments' ? (
               <div className="space-y-3 overflow-y-auto max-h-[50vh] pr-2 custom-scrollbar">
-                <div className="mb-4 rounded-xl bg-green-500/10 p-4 border border-green-500/20">
-                  <p className="text-xs text-green-300">
-                    Pagos procesados y acreditados exitosamente a través del Webhook.
+                <div className="mb-4 rounded-xl bg-blue-500/10 p-4 border border-blue-500/20">
+                  <p className="text-xs text-blue-300">
+                    Historial de pagos detectados. Los 'Acreditados' ya sumaron saldo al usuario, los 'Pendientes' están esperando confirmación de Mercado Pago.
                   </p>
                 </div>
                 {processedPayments.map((p, idx) => (
-                  <div key={`admin-paid-${p.firestoreId || p.id || idx}-${idx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
+                  <div key={`admin-paid-${p.firestoreId || p.id || idx}-${idx}`} className={`rounded-2xl border p-4 ${p.status === 'pending' ? 'border-yellow-500/20 bg-yellow-500/5' : 'border-white/5 bg-gray-800/40'}`}>
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
-                        <span className="rounded-full bg-green-500/20 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-green-400">
-                          Acreditado
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${p.status === 'pending' ? 'bg-yellow-500/20 text-yellow-500' : 'bg-green-500/20 text-green-400'}`}>
+                          {p.status === 'pending' ? 'Pendiente' : 'Acreditado'}
                         </span>
                         <span className="text-[10px] font-bold text-gray-500 uppercase">{p.purchaseType || 'monedas'}</span>
                       </div>

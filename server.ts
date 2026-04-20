@@ -66,6 +66,7 @@ async function startServer() {
   }
 
   const rooms = new Map<string, { players: Map<string, Player>; bots: Player[] }>();
+  const userSockets = new Map<string, string>(); // userId -> socketId
   const CELL = 24;
   const WORLD_W = 3000;
   const WORLD_H = 3000;
@@ -100,8 +101,8 @@ async function startServer() {
           const payment = new Payment(client);
           const paymentData = await payment.get({ id: String(mpPaymentId) });
           
-          if (paymentData.status === 'approved') {
-            const success = await processApprovedPayment(String(mpPaymentId), paymentData);
+          if (paymentData.status === 'approved' || paymentData.status === 'pending') {
+            const success = await processPaymentUpdate(String(mpPaymentId), paymentData);
             await doc.ref.update({ 
               processed: true, 
               success: success, 
@@ -205,12 +206,13 @@ async function startServer() {
     }
   });
 
-  // Helper to process approved payments
-  async function processApprovedPayment(paymentId: string, data: any) {
-    console.log(`[PAYMENT_PROCESSOR] Examining payment ${paymentId}. Status: ${data.status}`);
+  // Helper to process payments (approved or pending)
+  async function processPaymentUpdate(paymentId: string, data: any) {
+    const status = data.status;
+    console.log(`[PAYMENT_PROCESSOR] Examining payment ${paymentId}. Status: ${status}`);
     
-    if (data.status !== 'approved') {
-      console.log(`[PAYMENT_PROCESSOR] Payment ${paymentId} is not approved (${data.status}). Skipping.`);
+    if (status !== 'approved' && status !== 'pending') {
+      console.log(`[PAYMENT_PROCESSOR] Payment ${paymentId} status (${status}) not eligible for processing in this handler. Skipping.`);
       return false;
     }
 
@@ -224,23 +226,67 @@ async function startServer() {
     console.log(`[PAYMENT_PROCESSOR] Extracted Info: userId=${userId}, amount=${amount}, type=${purchaseType}, metadata Keys: ${Object.keys(metadata)}`);
 
     if (!userId) {
-      console.error("[PAYMENT_PROCESSOR] ERROR: No userId found in payment data. Cannot credit balance.");
+      console.error("[PAYMENT_PROCESSOR] ERROR: No userId found in payment data. Cannot process.");
       return false;
     }
-
-    if (amount <= 0 && pointsToAdd <= 0) {
-      console.error("[PAYMENT_PROCESSOR] ERROR: Amount is 0 or invalid. Check metadata fields.");
-      // We don't return false here to allow logs to be marked as "processed" but with errors
-    }
     
-    // 1. Check if this payment was already processed to prevent double crediting
+    // 1. Check if this payment was already processed as approved to prevent double crediting
     const paymentRef = db.collection('processed_payments').doc(paymentId);
     const paymentDoc = await paymentRef.get();
 
-    if (paymentDoc.exists) {
-      console.log(`Payment ${paymentId} already processed. Skipping.`);
-      return true; // Already processed is a success
+    if (paymentDoc.exists && paymentDoc.data()?.status === 'approved') {
+      console.log(`Payment ${paymentId} already approved and credited. Skipping.`);
+      return true;
     }
+
+    // Notify user via Socket.IO if they are online
+    const userSocketId = userSockets.get(userId);
+    if (userSocketId) {
+      console.log(`[PAYMENT_PROCESSOR] Notifying user ${userId} via socket ${userSocketId} about status ${status}`);
+      io.to(userSocketId).emit("payment_status_update", {
+        id: paymentId,
+        status: status,
+        amount: amount,
+        purchaseType: purchaseType
+      });
+    }
+
+    if (status === 'pending') {
+      console.log(`[PAYMENT_PROCESSOR] Recording payment ${paymentId} as pending in Firestore and Supabase.`);
+      await paymentRef.set({
+        userId,
+        amount,
+        purchaseType,
+        pointsAdded: purchaseType === 'points' ? pointsToAdd : (amount === 100000 ? 50000 : 0),
+        timestamp: FieldValue.serverTimestamp(),
+        status: 'pending',
+        mercadoPagoData: {
+          id: data.id,
+          status: data.status,
+          status_detail: data.status_detail,
+          external_reference: data.external_reference
+        }
+      }, { merge: true });
+
+      // Record as pending transaction in Supabase
+      try {
+        await supabase.from('transactions').insert({
+          user_id: userId,
+          type: 'pending',
+          currency: purchaseType === 'points' ? 'coins' : 'monedas',
+          amount: purchaseType === 'points' ? pointsToAdd : amount,
+          reason: `mercado_pago_pending: ${paymentId}`,
+          timestamp: new Date().toISOString()
+        });
+      } catch (err) {
+        console.error("Error logging pending transaction to Supabase:", err);
+      }
+
+      return true;
+    }
+
+    // From here on, it's 'approved'
+    console.log(`[PAYMENT_PROCESSOR] Proceeding to credit balance for approved payment ${paymentId}`);
 
     // 2. Update Firestore User
     const userRef = db.collection('users').doc(userId);
@@ -293,7 +339,7 @@ async function startServer() {
             status_detail: data.status_detail,
             external_reference: data.external_reference
           }
-        });
+        }, { merge: true });
       });
     } catch (transactionError) {
       console.error("Transaction failed:", transactionError);
@@ -438,14 +484,15 @@ async function startServer() {
           const data = await payment.get({ id: paymentId });
           console.log(`[WEBHOOK_BG] MP API Response status: ${data.status}`);
           
-          if (data.status === 'approved') {
-            const success = await processApprovedPayment(paymentId, data);
+          if (data.status === 'approved' || data.status === 'pending') {
+            const success = await processPaymentUpdate(paymentId, data);
             
             // Mark as processed in Firestore logs
             if (logRef) {
               await logRef.update({ 
                 processed: true, 
-                approved: true, 
+                approved: data.status === 'approved', 
+                status: data.status,
                 success: success,
                 processedAt: FieldValue.serverTimestamp()
               });
@@ -487,13 +534,13 @@ async function startServer() {
       const payment = new Payment(client);
       const data = await payment.get({ id: paymentId });
       
-      if (data.status === 'approved') {
-        const success = await processApprovedPayment(paymentId, data);
+      if (data.status === 'approved' || data.status === 'pending') {
+        const success = await processPaymentUpdate(paymentId, data);
         const metadata = data.metadata || {};
         return res.json({ 
           success, 
           status: data.status, 
-          already_processed: !success,
+          already_processed: data.status === 'approved' && !success,
           amount: metadata.coins_amount || data.transaction_amount,
           type: metadata.purchase_type || 'monedas',
           userId: metadata.user_id,
@@ -632,6 +679,11 @@ async function startServer() {
       const roomId = userData.serverId || getAvailableRoom();
       let room = rooms.get(roomId);
       
+      if (userData.id) {
+        userSockets.set(userData.id, socket.id);
+        (socket as any).userId = userData.id;
+      }
+      
       if (!room) {
         room = { players: new Map(), bots: [] };
         rooms.set(roomId, room);
@@ -747,6 +799,10 @@ async function startServer() {
     });
 
     socket.on("disconnect", () => {
+      const userId = (socket as any).userId;
+      if (userId && userSockets.get(userId) === socket.id) {
+        userSockets.delete(userId);
+      }
       console.log(`User disconnected: ${socket.id}`);
     });
   });
