@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, FormEvent } from 'react';
-import { User, PlayerSession, Food, Point } from '../types';
-import { WORLD_W, WORLD_H, BASE_SPEED, CELL, ALL_SKINS, SEGMENT_DISTANCE } from '../constants';
+import { User, PlayerSession, Food, Point, PowerUp, PowerUpType } from '../types';
+import { WORLD_W, WORLD_H, BASE_SPEED, CELL, ALL_SKINS, SEGMENT_DISTANCE, POWERUP_DURATION, POWERUP_SPAWN_CHANCE, MAGNET_RANGE } from '../constants';
 import { doc, setDoc, deleteDoc, onSnapshot, collection, query, where, serverTimestamp, addDoc, updateDoc, increment, orderBy, limit } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType, auth } from '../firebase';
 import { motion, AnimatePresence } from 'motion/react';
@@ -26,6 +26,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
   const otherPlayersRef = useRef<Record<string, PlayerSession>>({});
   const interpolatedPlayersRef = useRef<Record<string, PlayerSession>>({});
   const foodsRef = useRef<Record<string, Food>>({});
+  const powerUpsRef = useRef<Record<string, PowerUp>>({});
+  const [activePowerUps, setActivePowerUps] = useState<Record<string, number>>({});
   const [isBoosting, setIsBoosting] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
@@ -57,6 +59,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     hasAura: ALL_SKINS.find(s => s.id === user.equippedSkin)?.hasAura,
     auraType: ALL_SKINS.find(s => s.id === user.equippedSkin)?.auraType,
     isBoosting: false,
+    activePowerUps: {}
   });
 
   const mouseRef = useRef<Point>({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
@@ -169,30 +172,51 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       otherPlayersRef.current = players;
     }, (e) => handleFirestoreError(e, OperationType.LIST, 'arenaPlayers'));
 
-    // 3. Listen for food
-    const foodQuery = query(collection(db, 'arenaFood'), where('serverId', '==', serverId));
-    const unsubFood = onSnapshot(foodQuery, (snapshot) => {
-      const newFoods: Record<string, Food> = {};
-      snapshot.forEach((doc) => {
-        newFoods[doc.id] = { id: doc.id, ...doc.data() } as Food;
-      });
-      foodsRef.current = newFoods;
+      // 3. Listen for food
+      const foodQuery = query(collection(db, 'arenaFood'), where('serverId', '==', serverId));
+      const unsubFood = onSnapshot(foodQuery, (snapshot) => {
+        const newFoods: Record<string, Food> = {};
+        snapshot.forEach((doc) => {
+          newFoods[doc.id] = { id: doc.id, ...doc.data() } as Food;
+        });
+        foodsRef.current = newFoods;
 
-      // Base food spawning logic: Keep at least 40 items
-      if (snapshot.size < 40) {
-        const spawnCount = 40 - snapshot.size;
-        for (let i = 0; i < spawnCount; i++) {
-          addDoc(collection(db, 'arenaFood'), {
+        // Base food spawning logic: Keep at least 40 items
+        if (snapshot.size < 40) {
+          const spawnCount = 40 - snapshot.size;
+          for (let i = 0; i < spawnCount; i++) {
+            addDoc(collection(db, 'arenaFood'), {
+              x: Math.random() * WORLD_W,
+              y: Math.random() * WORLD_H,
+              value: 1,
+              type: 'normal',
+              color: `hsl(${Math.random() * 360}, 70%, 50%)`,
+              serverId
+            }).catch(() => {}); // Silently fail on quota
+          }
+        }
+      }, (e) => handleFirestoreError(e, OperationType.LIST, 'arenaFood'));
+
+      // 3.1 Listen for powerups
+      const powerUpQuery = query(collection(db, 'arenaPowerUps'), where('serverId', '==', serverId));
+      const unsubPowerUps = onSnapshot(powerUpQuery, (snapshot) => {
+        const newPowerUps: Record<string, PowerUp> = {};
+        snapshot.forEach((doc) => {
+          newPowerUps[doc.id] = { id: doc.id, ...doc.data() } as PowerUp;
+        });
+        powerUpsRef.current = newPowerUps;
+
+        // Base powerup spawning logic: Keep at least 3 items if possible
+        if (snapshot.size < 3) {
+          const types: PowerUpType[] = ['magnet', 'shield', 'turbo', 'ghost'];
+          addDoc(collection(db, 'arenaPowerUps'), {
             x: Math.random() * WORLD_W,
             y: Math.random() * WORLD_H,
-            value: 1,
-            type: 'normal',
-            color: `hsl(${Math.random() * 360}, 70%, 50%)`,
+            type: types[Math.floor(Math.random() * types.length)],
             serverId
-          }).catch(() => {}); // Silently fail on quota
+          }).catch(() => {});
         }
-      }
-    }, (e) => handleFirestoreError(e, OperationType.LIST, 'arenaFood'));
+      });
 
     // 4. Listen for chat
     const chatQuery = query(
@@ -280,7 +304,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
           }
         });
 
-        checkCollisions();
+        checkCollisions(dt);
         
         // Smooth other players movement locally (Interpolation)
         (Object.values(otherPlayersRef.current) as PlayerSession[]).forEach(target => {
@@ -324,7 +348,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
               color1: playerRef.current.color1,
               color2: playerRef.current.color2,
               displayName: playerRef.current.displayName,
-              skinEmoji: playerRef.current.skinEmoji
+              skinEmoji: playerRef.current.skinEmoji,
+              activePowerUps: playerRef.current.activePowerUps || {}
             });
           }
           
@@ -379,6 +404,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       cancelAnimationFrame(animId);
       unsubPlayers();
       unsubFood();
+      unsubPowerUps();
       unsubChat();
       unsubOnline();
       unsubKills();
@@ -409,9 +435,19 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       playerRef.current.angle += diff * Math.min(1, 8 * dt);
     }
 
-    const speed = isBoosting && playerRef.current.wager > 0 ? BASE_SPEED * 2 : BASE_SPEED;
     playerRef.current.isBoosting = isBoosting && playerRef.current.wager > 0;
-    if (isBoosting && playerRef.current.wager > 0) {
+    
+    // PowerUp Effects
+    const nowTs = Date.now();
+    const hasMagnet = playerRef.current.activePowerUps?.magnet && playerRef.current.activePowerUps.magnet > nowTs;
+    const hasShield = playerRef.current.activePowerUps?.shield && playerRef.current.activePowerUps.shield > nowTs;
+    const hasTurbo = playerRef.current.activePowerUps?.turbo && playerRef.current.activePowerUps.turbo > nowTs;
+    const hasGhost = playerRef.current.activePowerUps?.ghost && playerRef.current.activePowerUps.ghost > nowTs;
+
+    let speed = isBoosting && playerRef.current.wager > 0 ? BASE_SPEED * 2 : BASE_SPEED;
+    if (hasTurbo) speed *= 1.5;
+    
+    if (isBoosting && playerRef.current.wager > 0 && !hasTurbo) {
       playerRef.current.wager -= 0.2 * dt * 60; // Consume points over time
     }
     const newX = head.x + Math.cos(playerRef.current.angle) * speed * dt;
@@ -524,7 +560,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     bot.segments = trail;
   };
 
-  const checkCollisions = () => {
+  const checkCollisions = (dt: number) => {
     const head = playerRef.current.segments[0];
     let scoreChanged = false;
 
@@ -553,12 +589,46 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       setScore(Math.floor(playerRef.current.wager));
     }
 
+    // Magnet Effect: Pull food
+    const nowTs = Date.now();
+    if (playerRef.current.activePowerUps?.magnet && playerRef.current.activePowerUps.magnet > nowTs) {
+      Object.values(foodsRef.current).forEach(f => {
+        const food = f as Food;
+        const dx = head.x - food.x;
+        const dy = head.y - food.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < MAGNET_RANGE) {
+          food.x += (dx / dist) * 350 * dt;
+          food.y += (dy / dist) * 350 * dt;
+        }
+      });
+    }
+
+    // PowerUp collision
+    Object.entries(powerUpsRef.current).forEach(([id, puVal]) => {
+      const pu = puVal as PowerUp;
+      const d = Math.sqrt((head.x - pu.x) ** 2 + (head.y - pu.y) ** 2);
+      if (d < CELL * 1.5) {
+        deleteDoc(doc(db, 'arenaPowerUps', id)).catch(() => {});
+        soundManager.play('powerup');
+        
+        const expiry = Date.now() + POWERUP_DURATION;
+        playerRef.current.activePowerUps = {
+          ...(playerRef.current.activePowerUps || {}),
+          [pu.type]: expiry
+        };
+        setActivePowerUps(prev => ({ ...prev, [pu.type]: expiry }));
+      }
+    });
+
     // Collision detection (Head vs Body)
-    const isPlayerInvulnerable = playerRef.current.spawnTime && (Date.now() - playerRef.current.spawnTime < 1500);
+    const isPlayerInvulnerable = (playerRef.current.spawnTime && (Date.now() - playerRef.current.spawnTime < 1500)) || 
+                                 (playerRef.current.activePowerUps?.shield && playerRef.current.activePowerUps.shield > nowTs);
+    const isGhosted = playerRef.current.activePowerUps?.ghost && playerRef.current.activePowerUps.ghost > nowTs;
 
     // Other players collision (only head vs body)
     Object.values(otherPlayersRef.current).forEach((other: PlayerSession) => {
-      if (isPlayerInvulnerable) return;
+      if (isPlayerInvulnerable || isGhosted) return;
       const isOtherInvulnerable = other.spawnTime && (Date.now() - other.spawnTime < 1500);
       if (isOtherInvulnerable) return;
 
@@ -610,8 +680,18 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
                 killerName: user.displayName,
                 victimName: bot.displayName,
                 timestamp: Date.now(),
-                serverId
               }).catch(() => {});
+
+              // Chance to spawn powerup on kill
+              if (Math.random() < POWERUP_SPAWN_CHANCE) {
+                const types: PowerUpType[] = ['magnet', 'shield', 'turbo', 'ghost'];
+                addDoc(collection(db, 'arenaPowerUps'), {
+                  x: botHead.x,
+                  y: botHead.y,
+                  type: types[Math.floor(Math.random() * types.length)],
+                  serverId
+                }).catch(() => {});
+              }
             }
             break;
           }
@@ -856,6 +936,43 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       }
     });
 
+    // Powerups
+    ctx.shadowBlur = 10;
+    Object.values(powerUpsRef.current).forEach(puVal => {
+      const pu = puVal as any;
+      const time = Date.now() / 1000;
+      const pulse = Math.sin(time * 5) * 3;
+      const size = 15 + pulse;
+      
+      let color = '#fff';
+      let iconStr = '❓';
+      if (pu.type === 'magnet') { color = '#3b82f6'; iconStr = '🧲'; }
+      if (pu.type === 'shield') { color = '#22c55e'; iconStr = '🛡️'; }
+      if (pu.type === 'turbo') { color = '#f59e0b'; iconStr = '⚡'; }
+      if (pu.type === 'ghost') { color = '#a855f7'; iconStr = '👻'; }
+
+      ctx.shadowColor = color;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(pu.x, pu.y, size, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Outer ring
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(pu.x, pu.y, size + 4, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Icon
+      ctx.shadowBlur = 0;
+      ctx.font = `${size}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(iconStr, pu.x, pu.y);
+    });
+    ctx.shadowBlur = 0;
+
     // Draw Other Players
     Object.values(interpolatedPlayersRef.current).forEach((p: PlayerSession) => {
       drawSnake(ctx, p);
@@ -953,9 +1070,15 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     if (trail.length < 2) return;
 
     const isInvulnerable = snake.spawnTime && (Date.now() - snake.spawnTime < 1500);
+    const nowTs = Date.now();
+    const hasShield = snake.activePowerUps?.shield && snake.activePowerUps.shield > nowTs;
+    const hasGhost = snake.activePowerUps?.ghost && snake.activePowerUps.ghost > nowTs;
+    const hasMagnet = snake.activePowerUps?.magnet && snake.activePowerUps.magnet > nowTs;
+    const hasTurbo = snake.activePowerUps?.turbo && snake.activePowerUps.turbo > nowTs;
+
     ctx.save();
-    if (isInvulnerable) {
-      ctx.globalAlpha = 0.5;
+    if (isInvulnerable || hasGhost) {
+      ctx.globalAlpha = hasGhost ? 0.3 : 0.5;
     }
 
     // Constant thickness (no growth with wager)
@@ -964,7 +1087,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     const headRadius = 14; // Fixed radius for head
 
     // Aura (Visual Ability)
-    if (snake.hasAura) {
+    if (snake.hasAura || hasShield) {
       ctx.save();
       const time = Date.now() / 1000;
       const auraPulse = Math.sin(time * 5) * 2;
@@ -973,7 +1096,11 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       // Layered glow
       const gradient = ctx.createRadialGradient(trail[0].x, trail[0].y, headRadius, trail[0].x, trail[0].y, auraRadius);
       
-      if (snake.auraType === 'fire') {
+      if (hasShield) {
+        gradient.addColorStop(0, 'rgba(34, 197, 94, 0.6)');
+        gradient.addColorStop(0.5, 'rgba(34, 197, 94, 0.3)');
+        gradient.addColorStop(1, 'rgba(34, 197, 94, 0)');
+      } else if (snake.auraType === 'fire') {
         gradient.addColorStop(0, 'rgba(255, 68, 0, 0.5)');
         gradient.addColorStop(0.5, 'rgba(255, 153, 0, 0.3)');
         gradient.addColorStop(1, 'rgba(255, 204, 0, 0)');
@@ -1005,8 +1132,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     }
 
     // Neon glow for the whole snake
-    ctx.shadowBlur = snake.isBoosting ? 20 + Math.random() * 10 : 10;
-    ctx.shadowColor = snake.isBoosting ? '#fff' : snake.color1;
+    ctx.shadowBlur = (snake.isBoosting || hasTurbo) ? 20 + Math.random() * 10 : 10;
+    ctx.shadowColor = (snake.isBoosting || hasTurbo) ? '#fff' : snake.color1;
 
     // Body segments (drawn from tail to head)
     for (let i = trail.length - 1; i >= pointsPerSegment; i -= pointsPerSegment) {
@@ -1015,13 +1142,13 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       // Constant thickness (no tapering)
       const r = baseRadius;
       
-      if (snake.isBoosting) {
+      if (snake.isBoosting || hasTurbo) {
         ctx.fillStyle = Math.random() > 0.5 ? '#fff' : (segmentIndex % 2 === 0 ? snake.color1 : snake.color2);
         // Aura particles
         if (Math.random() > 0.8) {
           ctx.save();
           ctx.shadowBlur = 5;
-          ctx.fillStyle = '#fff';
+          ctx.fillStyle = hasTurbo ? '#f59e0b' : '#fff';
           ctx.beginPath();
           ctx.arc(trail[i].x + (Math.random() - 0.5) * r * 3, trail[i].y + (Math.random() - 0.5) * r * 3, 2, 0, Math.PI * 2);
           ctx.fill();
@@ -1201,6 +1328,59 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         </div>
       </div>
 
+      {/* Active Powerups UI */}
+      <div className="pointer-events-none absolute left-4 top-40 flex flex-col gap-2">
+        <AnimatePresence>
+          {Object.entries(activePowerUps).map(([type, expiry]) => {
+            const now = Date.now();
+            if ((expiry as any) <= now) return null;
+            
+            const timeLeft = Math.ceil(((expiry as any) - now) / 1000);
+            const progress = (((expiry as any) - now) / POWERUP_DURATION) * 100;
+            
+            let color = 'bg-white';
+            let icon = <Zap size={16} />;
+            let label = type.toUpperCase();
+
+            if (type === 'magnet') { color = 'bg-blue-500'; label = 'IMÁN'; }
+            if (type === 'shield') { color = 'bg-green-500'; label = 'ESCUDO'; }
+            if (type === 'turbo') { color = 'bg-orange-500'; label = 'TURBO'; }
+            if (type === 'ghost') { color = 'bg-purple-500'; label = 'FANTASMA'; }
+
+            return (
+              <motion.div
+                key={`active-pu-${type}`}
+                initial={{ x: -20, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: -20, opacity: 0 }}
+                className="flex items-center gap-3 rounded-xl bg-black/60 p-2 pr-4 backdrop-blur-md border border-white/10"
+              >
+                <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${color} text-white shadow-lg`}>
+                  {type === 'magnet' && '🧲'}
+                  {type === 'shield' && '🛡️'}
+                  {type === 'turbo' && '⚡'}
+                  {type === 'ghost' && '👻'}
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-[10px] font-black text-white tracking-widest">{label}</span>
+                    <span className="text-[10px] font-bold text-gray-400">{timeLeft}s</span>
+                  </div>
+                  <div className="h-1 w-24 overflow-hidden rounded-full bg-white/10">
+                    <motion.div 
+                      className={`h-full ${color}`}
+                      initial={{ width: '100%' }}
+                      animate={{ width: `${progress}%` }}
+                      transition={{ duration: 0.1 }}
+                    />
+                  </div>
+                </div>
+              </motion.div>
+            );
+          })}
+        </AnimatePresence>
+      </div>
+
       {/* Chat System */}
       <div className="absolute bottom-4 left-4 z-50 flex flex-col gap-2">
         <AnimatePresence>
@@ -1220,8 +1400,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
-                {messages.map((msg) => (
-                  <div key={`msg-${msg.id}`} className="text-sm">
+                {messages.map((msg, idx) => (
+                  <div key={`msg-${msg.id}-${idx}`} className="text-sm">
                     <span className="font-bold text-blue-400">{msg.displayName}: </span>
                     <span className="text-gray-200">{msg.text}</span>
                   </div>
@@ -1256,9 +1436,9 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       {/* Kill Feed */}
       <div className="pointer-events-none absolute right-4 top-20 flex flex-col items-end gap-2">
         <AnimatePresence mode="popLayout">
-          {kills.map((kill) => (
+          {kills.map((kill, idx) => (
             <motion.div
-              key={`kill-${kill.id}`}
+              key={`kill-${kill.id}-${idx}`}
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: 20 }}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, TouchEvent } from 'react';
-import { User, PlayerSession, Food, Point } from '../types';
-import { WORLD_W, WORLD_H, BASE_SPEED, CELL, ALL_SKINS, SEGMENT_DISTANCE } from '../constants';
+import { User, PlayerSession, Food, Point, PowerUp, PowerUpType } from '../types';
+import { WORLD_W, WORLD_H, BASE_SPEED, CELL, ALL_SKINS, SEGMENT_DISTANCE, POWERUP_DURATION, POWERUP_SPAWN_CHANCE, MAGNET_RANGE } from '../constants';
 import { doc, updateDoc, increment } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { motion, AnimatePresence } from 'motion/react';
@@ -22,6 +22,8 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
   const [isCollecting, setIsCollecting] = useState(false);
   const [isBoosting, setIsBoosting] = useState(false);
   const foodsRef = useRef<Food[]>([]);
+  const powerUpsRef = useRef<PowerUp[]>([]);
+  const [activePowerUps, setActivePowerUps] = useState<Record<string, number>>({});
   const lastTapRef = useRef<number>(0);
   const boostTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isTouchBoostingRef = useRef(false);
@@ -42,6 +44,7 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     hasAura: ALL_SKINS.find(s => s.id === user.equippedSkin)?.hasAura,
     auraType: ALL_SKINS.find(s => s.id === user.equippedSkin)?.auraType,
     isBoosting: false,
+    activePowerUps: {}
   });
 
   const botsRef = useRef<PlayerSession[]>([]);
@@ -83,6 +86,17 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     }
     foodsRef.current = initialFood;
 
+    // Initial powerups
+    const types: PowerUpType[] = ['magnet', 'shield', 'turbo', 'ghost'];
+    for (let i = 0; i < 5; i++) {
+      powerUpsRef.current.push({
+        id: Math.random().toString(),
+        x: Math.random() * WORLD_W,
+        y: Math.random() * WORLD_H,
+        type: types[Math.floor(Math.random() * types.length)]
+      });
+    }
+
     let lastTime = performance.now();
     const loop = (now: number) => {
       const dt = (now - lastTime) / 1000;
@@ -93,7 +107,7 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
         botsRef.current.forEach(bot => {
           if (bot.isAlive) updateBot(bot, dt);
         });
-        checkCollisions();
+        checkCollisions(dt);
       }
 
       render();
@@ -124,8 +138,18 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
       playerRef.current.angle += diff * Math.min(1, 8 * dt);
     }
 
-    const speed = isBoosting ? BASE_SPEED * 2 : BASE_SPEED;
     playerRef.current.isBoosting = isBoosting;
+    
+    // PowerUp Effects
+    const nowTs = Date.now();
+    const hasMagnet = playerRef.current.activePowerUps?.magnet && playerRef.current.activePowerUps.magnet > nowTs;
+    const hasShield = playerRef.current.activePowerUps?.shield && playerRef.current.activePowerUps.shield > nowTs;
+    const hasTurbo = playerRef.current.activePowerUps?.turbo && playerRef.current.activePowerUps.turbo > nowTs;
+    const hasGhost = playerRef.current.activePowerUps?.ghost && playerRef.current.activePowerUps.ghost > nowTs;
+
+    let speed = isBoosting ? BASE_SPEED * 2 : BASE_SPEED;
+    if (hasTurbo) speed *= 1.5;
+
     if (isBoosting) {
       setScore(s => Math.max(0, s - 0.2 * dt * 60));
     }
@@ -249,9 +273,7 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
       trail.pop();
     }
     bot.segments = trail;
-  };
-
-  const checkCollisions = () => {
+  };  const checkCollisions = (dt: number) => {
     const head = playerRef.current.segments[0];
     let scoreGain = 0;
 
@@ -260,14 +282,8 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
       const d = Math.sqrt((head.x - f.x) ** 2 + (head.y - f.y) ** 2);
       if (d < CELL) {
         scoreGain += f.value;
-        
-        // Play sound
-        if (f.value >= 5) {
-          soundManager.play('goldFood');
-        } else {
-          soundManager.play('food');
-        }
-        
+        if (f.value >= 5) soundManager.play('goldFood');
+        else soundManager.play('food');
         return false;
       }
       
@@ -302,30 +318,62 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     }
     foodsRef.current = remaining;
 
-    // Respawn bots to maintain constant count
-    const aliveBots = botsRef.current.filter(b => b.isAlive);
-    if (aliveBots.length < botCount) {
-      // Add a new bot after a small delay (handled by the loop)
-      // We can just add it immediately or with a chance
-      if (Math.random() > 0.98) { // Approx 1 respawn attempt per second at 60fps
-        botsRef.current.push(createBot(botsRef.current.length));
+    // Magnet Effect: Pull food
+    const nowTs = Date.now();
+    if (playerRef.current.activePowerUps?.magnet && playerRef.current.activePowerUps.magnet > nowTs) {
+      foodsRef.current.forEach(food => {
+        const dx = head.x - food.x;
+        const dy = head.y - food.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < MAGNET_RANGE) {
+          food.x += (dx / dist) * 350 * dt;
+          food.y += (dy / dist) * 350 * dt;
+        }
+      });
+    }
+
+    // PowerUp collision
+    for (let i = powerUpsRef.current.length - 1; i >= 0; i--) {
+      const pu = powerUpsRef.current[i];
+      const d = Math.sqrt((head.x - pu.x) ** 2 + (head.y - pu.y) ** 2);
+      if (d < CELL * 1.5) {
+        powerUpsRef.current.splice(i, 1);
+        soundManager.play('powerup');
+        
+        const expiry = Date.now() + POWERUP_DURATION;
+        playerRef.current.activePowerUps = {
+          ...(playerRef.current.activePowerUps || {}),
+          [pu.type]: expiry
+        };
+        setActivePowerUps(prev => ({ ...prev, [pu.type]: expiry }));
       }
     }
 
+    // Respawn powerups if needed
+    if (powerUpsRef.current.length < 3) {
+      const types: PowerUpType[] = ['magnet', 'shield', 'turbo', 'ghost'];
+      powerUpsRef.current.push({
+        id: Math.random().toString(),
+        x: Math.random() * WORLD_W,
+        y: Math.random() * WORLD_H,
+        type: types[Math.floor(Math.random() * types.length)]
+      });
+    }
+
     // Collision detection (Head vs Body)
-    const isPlayerInvulnerable = playerRef.current.spawnTime && (Date.now() - playerRef.current.spawnTime < 1500);
+    const isPlayerInvulnerable = (playerRef.current.spawnTime && (Date.now() - playerRef.current.spawnTime < 1500)) ||
+                                 (playerRef.current.activePowerUps?.shield && playerRef.current.activePowerUps.shield > nowTs);
+    const isGhosted = playerRef.current.activePowerUps?.ghost && playerRef.current.activePowerUps.ghost > nowTs;
 
     botsRef.current.forEach(bot => {
       if (!bot.isAlive) return;
       const isBotInvulnerable = bot.spawnTime && (Date.now() - bot.spawnTime < 1500);
 
       // Player head vs Bot body
-      if (!isPlayerInvulnerable && !isBotInvulnerable) {
+      if (!isPlayerInvulnerable && !isGhosted && !isBotInvulnerable) {
         bot.segments.forEach(seg => {
           const d = Math.sqrt((head.x - seg.x) ** 2 + (head.y - seg.y) ** 2);
-          if (d < CELL) {
-            handleDeath();
-          }
+          if (d < CELL) handleDeath();
         });
       }
 
@@ -337,60 +385,50 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
           if (d < CELL) {
             bot.isAlive = false;
             
-            // Increment bot kills for the player
+            // Increment bot kills
             if (user?.id) {
               const userRef = doc(db, 'users', user.id);
-              updateDoc(userRef, {
-                botKills: increment(1)
-              }).catch((e) => console.error("Error updating bot kills:", e));
+              updateDoc(userRef, { botKills: increment(1) }).catch(() => {});
             }
 
-            // Drop food where bot died along segments
+            // Drop food
             bot.segments.forEach((s, i) => {
-              if (i % 2 === 0) { // Every 2 segments to avoid too many local objects
+              if (i % 2 === 0) {
                 foodsRef.current.push({
                   id: Math.random().toString(),
                   x: s.x,
                   y: s.y,
-                  value: 2,
+                  value: 3,
                   type: 'normal',
                   color: bot.color1
                 });
               }
             });
+
+            // Chance to spawn powerup on kill
+            if (Math.random() < POWERUP_SPAWN_CHANCE) {
+              const types: PowerUpType[] = ['magnet', 'shield', 'turbo', 'ghost'];
+              powerUpsRef.current.push({
+                id: Math.random().toString(),
+                x: botHead.x,
+                y: botHead.y,
+                type: types[Math.floor(Math.random() * types.length)]
+              });
+            }
           }
         });
       }
-
-      // Bot head vs Other bot body
-      if (!isBotInvulnerable) {
-        botsRef.current.forEach(otherBot => {
-          if (bot.id === otherBot.id || !otherBot.isAlive) return;
-          const isOtherInvulnerable = otherBot.spawnTime && (Date.now() - otherBot.spawnTime < 1000);
-          if (isOtherInvulnerable) return;
-
-          const botHead = bot.segments[0];
-          otherBot.segments.forEach(seg => {
-            const d = Math.sqrt((botHead.x - seg.x) ** 2 + (botHead.y - seg.y) ** 2);
-            if (d < CELL) {
-              bot.isAlive = false;
-              // Drop food where bot died
-              bot.segments.forEach(s => {
-                foodsRef.current.push({
-                  id: Math.random().toString(),
-                  x: s.x,
-                  y: s.y,
-                  value: 1,
-                  type: 'normal',
-                  color: bot.color1
-                });
-              });
-            }
-          });
-        });
-      }
     });
+
+    // Respawn bots
+    const aliveBots = botsRef.current.filter(b => b.isAlive);
+    if (aliveBots.length < botCount) {
+      if (Math.random() > 0.98) {
+        botsRef.current.push(createBot(botsRef.current.length));
+      }
+    }
   };
+;
 
   const handleDeath = () => {
     if (!isAlive || !playerRef.current.isAlive) return;
@@ -583,26 +621,34 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     if (trail.length < 2) return;
 
     const isInvulnerable = snake.spawnTime && (Date.now() - snake.spawnTime < 1500);
+    const nowTs = Date.now();
+    const hasShield = snake.activePowerUps?.shield && snake.activePowerUps.shield > nowTs;
+    const hasGhost = snake.activePowerUps?.ghost && snake.activePowerUps.ghost > nowTs;
+    const hasMagnet = snake.activePowerUps?.magnet && snake.activePowerUps.magnet > nowTs;
+    const hasTurbo = snake.activePowerUps?.turbo && snake.activePowerUps.turbo > nowTs;
+
     ctx.save();
-    if (isInvulnerable) {
-      ctx.globalAlpha = 0.5;
+    if (isInvulnerable || hasGhost) {
+      ctx.globalAlpha = hasGhost ? 0.3 : 0.5;
     }
 
-    const pointsPerSegment = 3; // Closer segments for natural look
-    const baseRadius = 10; // Fixed radius for body
-    const headRadius = 14; // Fixed radius for head
+    const pointsPerSegment = 5;
+    const baseRadius = 10;
+    const headRadius = 14;
 
-    // Aura (Visual Ability)
-    if (snake.hasAura) {
+    // Aura
+    if (snake.hasAura || hasShield) {
       ctx.save();
       const time = Date.now() / 1000;
       const auraPulse = Math.sin(time * 5) * 2;
       const auraRadius = headRadius + 8 + auraPulse;
-      
-      // Layered glow
       const gradient = ctx.createRadialGradient(trail[0].x, trail[0].y, headRadius, trail[0].x, trail[0].y, auraRadius);
       
-      if (snake.auraType === 'fire') {
+      if (hasShield) {
+        gradient.addColorStop(0, 'rgba(34, 197, 94, 0.6)');
+        gradient.addColorStop(0.5, 'rgba(34, 197, 94, 0.3)');
+        gradient.addColorStop(1, 'rgba(34, 197, 94, 0)');
+      } else if (snake.auraType === 'fire') {
         gradient.addColorStop(0, 'rgba(255, 68, 0, 0.5)');
         gradient.addColorStop(0.5, 'rgba(255, 153, 0, 0.3)');
         gradient.addColorStop(1, 'rgba(255, 204, 0, 0)');
@@ -616,40 +662,23 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
       ctx.beginPath();
       ctx.arc(trail[0].x, trail[0].y, auraRadius, 0, Math.PI * 2);
       ctx.fill();
-      
-      // Particles
-      if (Math.random() > 0.6) {
-        if (snake.auraType === 'fire') {
-          ctx.fillStyle = `rgba(255, ${Math.floor(Math.random() * 100 + 50)}, 0, 0.5)`;
-        } else if (snake.auraType === 'ice') {
-          ctx.fillStyle = `rgba(${Math.floor(Math.random() * 50 + 200)}, 255, 255, 0.5)`;
-        }
-        ctx.beginPath();
-        const px = trail[0].x + (Math.random() - 0.5) * headRadius * 2;
-        const py = trail[0].y + (Math.random() - 0.5) * headRadius * 2;
-        ctx.arc(px, py, Math.random() * 3 + 1, 0, Math.PI * 2);
-        ctx.fill();
-      }
       ctx.restore();
     }
 
-    // Neon glow for the whole snake
-    ctx.shadowBlur = snake.isBoosting ? 20 + Math.random() * 10 : 10;
-    ctx.shadowColor = snake.isBoosting ? '#fff' : snake.color1;
+    // Neon glow
+    ctx.shadowBlur = (snake.isBoosting || hasTurbo) ? 20 + Math.random() * 10 : 10;
+    ctx.shadowColor = (snake.isBoosting || hasTurbo) ? '#fff' : snake.color1;
 
     for (let i = trail.length - 1; i >= pointsPerSegment; i -= pointsPerSegment) {
       const segmentIndex = Math.floor(i / pointsPerSegment);
-      
-      // Constant thickness (no tapering)
       const r = baseRadius;
       
-      if (snake.isBoosting) {
+      if (snake.isBoosting || hasTurbo) {
         ctx.fillStyle = Math.random() > 0.5 ? '#fff' : (segmentIndex % 2 === 0 ? snake.color1 : snake.color2);
-        // Aura particles
         if (Math.random() > 0.8) {
           ctx.save();
           ctx.shadowBlur = 5;
-          ctx.fillStyle = '#fff';
+          ctx.fillStyle = hasTurbo ? '#f59e0b' : '#fff';
           ctx.beginPath();
           ctx.arc(trail[i].x + (Math.random() - 0.5) * r * 3, trail[i].y + (Math.random() - 0.5) * r * 3, 2, 0, Math.PI * 2);
           ctx.fill();
@@ -664,12 +693,11 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
       ctx.fill();
     }
     const head = trail[0];
-    ctx.fillStyle = snake.isBoosting ? '#fff' : snake.color1;
+    ctx.fillStyle = (snake.isBoosting || hasTurbo) ? '#fff' : snake.color1;
     ctx.beginPath(); ctx.arc(head.x, head.y, headRadius, 0, Math.PI * 2); ctx.fill();
     
-    ctx.shadowBlur = 0; // Reset shadow for eyes/emoji
+    ctx.shadowBlur = 0; 
     
-    // Emoji Head support
     if (snake.skinEmoji && snake.skinEmoji !== '🟢') {
       ctx.save();
       ctx.translate(head.x, head.y);
@@ -680,7 +708,6 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
       ctx.fillText(snake.skinEmoji, 0, 0);
       ctx.restore();
     } else {
-      // Eyes (only if no emoji)
       const eyeOff = CELL / 4;
       const ex1 = head.x + Math.cos(snake.angle - 0.5) * eyeOff;
       const ey1 = head.y + Math.sin(snake.angle - 0.5) * eyeOff;
@@ -771,6 +798,58 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
           <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Saldo:</span>
           <span className="text-sm font-black text-yellow-500">{user.coins}</span>
         </div>
+      </div>
+
+      {/* Active Powerups UI */}
+      <div className="pointer-events-none absolute left-4 top-24 flex flex-col gap-2">
+        <AnimatePresence>
+          {Object.entries(activePowerUps).map(([type, expiry]) => {
+            const now = Date.now();
+            if ((expiry as any) <= now) return null;
+            
+            const timeLeft = Math.ceil(((expiry as any) - now) / 1000);
+            const progress = (((expiry as any) - now) / POWERUP_DURATION) * 100;
+            
+            let color = 'bg-white';
+            let label = type.toUpperCase();
+
+            if (type === 'magnet') { color = 'bg-blue-500'; label = 'IMÁN'; }
+            if (type === 'shield') { color = 'bg-green-500'; label = 'ESCUDO'; }
+            if (type === 'turbo') { color = 'bg-orange-500'; label = 'TURBO'; }
+            if (type === 'ghost') { color = 'bg-purple-500'; label = 'FANTASMA'; }
+
+            return (
+              <motion.div
+                key={`active-pu-${type}`}
+                initial={{ x: -20, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: -20, opacity: 0 }}
+                className="flex items-center gap-3 rounded-xl bg-black/60 p-2 pr-4 backdrop-blur-md border border-white/10"
+              >
+                <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${color} text-white shadow-lg`}>
+                  {type === 'magnet' && '🧲'}
+                  {type === 'shield' && '🛡️'}
+                  {type === 'turbo' && '⚡'}
+                  {type === 'ghost' && '👻'}
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-[10px] font-black text-white tracking-widest">{label}</span>
+                    <span className="text-[10px] font-bold text-gray-400">{timeLeft}s</span>
+                  </div>
+                  <div className="h-1 w-24 overflow-hidden rounded-full bg-white/10">
+                    <motion.div 
+                      className={`h-full ${color}`}
+                      initial={{ width: '100%' }}
+                      animate={{ width: `${progress}%` }}
+                      transition={{ duration: 0.1 }}
+                    />
+                  </div>
+                </div>
+              </motion.div>
+            );
+          })}
+        </AnimatePresence>
       </div>
 
       {/* Floating Collect Button - Moved to the right side with pointer-events enabled */}

@@ -6,6 +6,10 @@ export const BASE_SPEED = 130;
 export const CELL = 24;
 export const SEGMENT_DISTANCE = 5; // Distance between segments for better fluidity and separation
 
+export const POWERUP_DURATION = 10000; // 10 seconds
+export const POWERUP_SPAWN_CHANCE = 0.15; // 15% chance
+export const MAGNET_RANGE = 200; // Magnet pull range
+
 export const ALL_SKINS: Skin[] = [
   { id: 'default', name: 'Default', icon: '🟢', rarity: 'common', colors: ['#22ff44', '#11cc33'] },
   { id: 'ocean', name: 'Azul', icon: '🔵', rarity: 'common', colors: ['#2288ff', '#1166cc'] },

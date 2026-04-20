@@ -62,6 +62,7 @@ async function startServer() {
     skinEmoji?: string;
     hasAura?: boolean;
     auraType?: string;
+    activePowerUps?: Record<string, number>;
   }
 
   const rooms = new Map<string, { players: Map<string, Player>; bots: Player[] }>();
@@ -678,15 +679,23 @@ async function startServer() {
       // Update server-side state
       player.segments = data.segments || [];
       player.wager = data.wager || player.wager;
+      player.activePowerUps = data.activePowerUps || {};
       
       // Server-side collision detection: Head vs Other Bodies
       const head = player.segments[0];
       if (head) {
-        const isInvulnerable = Date.now() - player.spawnTime < 1000;
+        const now = Date.now();
+        const isInvulnerable = now - player.spawnTime < 1000;
+        const hasShield = player.activePowerUps?.shield && player.activePowerUps.shield > now;
+        const hasGhost = player.activePowerUps?.ghost && player.activePowerUps.ghost > now;
         
-        if (!isInvulnerable) {
+        if (!isInvulnerable && !hasShield && !hasGhost) {
           for (const [otherId, other] of room.players.entries()) {
             if (otherId === socket.id || !other.isAlive) continue;
+            
+            // Check if OTHER player is ghosted - if so, we can't hit them
+            const otherGhost = other.activePowerUps?.ghost && other.activePowerUps.ghost > now;
+            if (otherGhost) continue;
             
             const otherInvulnerable = Date.now() - other.spawnTime < 1000;
             if (otherInvulnerable) continue;

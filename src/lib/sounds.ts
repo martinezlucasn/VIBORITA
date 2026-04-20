@@ -6,6 +6,7 @@ const SOUNDS = {
   death: 'https://assets.mixkit.co/active_storage/sfx/2578/2578-preview.mp3',
   boost: 'https://assets.mixkit.co/active_storage/sfx/2574/2574-preview.mp3',
   collect: 'https://assets.mixkit.co/active_storage/sfx/2021/2021-preview.mp3',
+  powerup: 'https://assets.mixkit.co/active_storage/sfx/2019/2019-preview.mp3',
 };
 
 class SoundManager {

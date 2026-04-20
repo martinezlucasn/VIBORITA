@@ -1083,9 +1083,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                         { id: 'i_g', name: 'Insomnio de Oro', desc: 'Jugar 1.000 veces (00:00 - 05:00 AM)', icon: <Moon size={20} />, color: '#ffd700', current: insomnia, goal: 1000, unlocked: insomnia >= 1000 },
                       ];
 
-                      return medals.map(medal => (
+                      return medals.map((medal, idx) => (
                         <button
-                          key={`medal-box-${medal.id}`}
+                          key={`medal-box-${medal.id}-${idx}`}
                           onClick={() => setSelectedMedal(medal)}
                           className={`group relative flex aspect-square items-center justify-center rounded-xl bg-black/40 border transition-all hover:border-white/20 active:scale-95 ${medal.unlocked ? 'border-white/10 shadow-lg' : 'border-transparent opacity-30 filter grayscale hover:opacity-100'}`}
                           style={{ borderColor: medal.unlocked ? `${medal.color}44` : 'transparent' }}
@@ -1181,10 +1181,10 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       <Plus size={14} /> Solicitudes Pendientes
                     </h3>
                     <div className="space-y-2">
-                      {friendships.filter(f => f.status === 'pending' && f.requesterId !== user.id).map(f => {
+                      {friendships.filter(f => f.status === 'pending' && f.requesterId !== user.id).map((f, idx) => {
                         const requester = friendProfiles[f.requesterId];
                         return (
-                          <div key={`req-${f.id}`} className="flex items-center justify-between rounded-xl bg-yellow-500/5 p-3 border border-yellow-500/20">
+                          <div key={`req-${f.id}-${idx}`} className="flex items-center justify-between rounded-xl bg-yellow-500/5 p-3 border border-yellow-500/20">
                             <div className="flex items-center gap-3">
                               <div className="h-8 w-8 rounded-full bg-yellow-500/20 flex items-center justify-center text-yellow-500 font-bold">
                                 {requester?.displayName?.[0].toUpperCase() || '?'}
@@ -1221,14 +1221,14 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                     <Users size={14} /> Mis Amigos
                   </h3>
                   <div className="max-h-80 space-y-2 overflow-y-auto pr-2 custom-scrollbar">
-                    {friendships.filter(f => f.status === 'accepted').map(f => {
+                    {friendships.filter(f => f.status === 'accepted').map((f, idx) => {
                       const friendId = f.uids.find(id => id !== user.id)!;
                       const friend = friendProfiles[friendId];
                       const isOnline = friend && (currentTime - friend.lastActive < 60000);
                       
                       return (
                         <div 
-                          key={`friend-${f.id}`} 
+                          key={`friend-${f.id}-${idx}`} 
                           onClick={() => friend && setSelectedFriend(friend)}
                           className="group flex items-center justify-between rounded-xl bg-white/5 p-3 border border-white/5 hover:bg-white/10 transition-all cursor-pointer"
                         >
@@ -1378,9 +1378,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                   {[
                     { points: 1000, cost: 100 },
                     { points: 2000, cost: 175 }
-                  ].map((pkg) => (
+                  ].map((pkg, idx) => (
                     <button
-                      key={`exchange-pkg-${pkg.points}`}
+                      key={`exchange-pkg-${pkg.points}-${idx}`}
                       onClick={() => handleExchangePoints(pkg.points, pkg.cost)}
                       disabled={user.monedas < pkg.cost}
                       className="group relative flex items-center justify-between rounded-2xl border border-white/5 bg-white/5 p-4 transition-all hover:bg-blue-600/20 hover:border-blue-500/50 disabled:opacity-30 active:scale-95"
@@ -1413,9 +1413,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
               </div>
               
               <div className="grid grid-cols-2 gap-3">
-                {[150, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, 100000].map((amount) => (
+                {[150, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, 100000].map((amount, idx) => (
                   <button
-                    key={`coin-pkg-${amount}`}
+                    key={`coin-pkg-${amount}-${idx}`}
                     onClick={() => setSelectedCoinPackage(amount)}
                     className={`group relative flex flex-col items-center justify-center rounded-2xl border p-4 transition-all active:scale-95 ${
                       amount === 100000 
@@ -1460,8 +1460,8 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             </div>
             
             <div className="max-h-[300px] space-y-3 overflow-y-auto pr-2 custom-scrollbar">
-              {withdrawalHistory.map((w) => (
-                <div key={`withdraw-${w.id}`} className="rounded-xl bg-white/5 p-4 border border-white/5 hover:bg-white/10 transition-colors">
+              {withdrawalHistory.map((w, idx) => (
+                <div key={`withdraw-${w.id}-${idx}`} className="rounded-xl bg-white/5 p-4 border border-white/5 hover:bg-white/10 transition-colors">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-[10px] font-bold text-gray-500">{new Date(w.timestamp).toLocaleDateString()}</span>
                     <span className={`rounded-full px-2 py-0.5 text-[8px] font-black uppercase tracking-widest ${w.status === 'completed' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'}`}>
@@ -1515,14 +1515,14 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             </button>
           </div>
           <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-2 custom-scrollbar">
-            {topPlayers.map((player, index) => (
+            {topPlayers.map((player, idx) => (
               <div 
-                key={`rank-${player.id}`} 
+                key={`rank-${player.id}-${idx}`} 
                 className={`flex items-center justify-between rounded-xl p-4 ${player.id === user.id ? 'bg-blue-600/20 border border-blue-500/30' : 'bg-gray-800/50'}`}
               >
                 <div className="flex items-center gap-4">
-                  <span className={`text-xl font-black ${index === 0 ? 'text-yellow-500' : index === 1 ? 'text-gray-300' : index === 2 ? 'text-orange-500' : 'text-gray-500'}`}>
-                    #{index + 1}
+                  <span className={`text-xl font-black ${idx === 0 ? 'text-yellow-500' : idx === 1 ? 'text-gray-300' : idx === 2 ? 'text-orange-500' : 'text-gray-500'}`}>
+                    #{idx + 1}
                   </span>
                   <div className="flex flex-col">
                     <div className="flex items-center gap-2">
@@ -1692,9 +1692,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             <button onClick={() => setView('main')} className="text-gray-400 hover:text-white">Cerrar</button>
           </div>
           <div className="grid grid-cols-3 gap-4 sm:grid-cols-4">
-            {ALL_SKINS.filter(s => user.ownedSkins.includes(s.id)).map(skin => (
+            {ALL_SKINS.filter(s => user.ownedSkins.includes(s.id)).map((skin, idx) => (
               <button
-                key={skin.id}
+                key={`owned-skin-${skin.id}-${idx}`}
                 onClick={() => handleEquip(skin.id)}
                 className={`group relative flex flex-col items-center rounded-2xl border-2 p-4 transition-all ${user.equippedSkin === skin.id ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-800 hover:border-gray-500'}`}
               >
@@ -1745,7 +1745,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 <h3 className="text-xl font-black uppercase tracking-widest text-white border-l-4 border-yellow-500 pl-4">Skins Disponibles</h3>
               </div>
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                {ALL_SKINS.filter(s => !user.ownedSkins.includes(s.id)).map(skin => {
+                {ALL_SKINS.filter(s => !user.ownedSkins.includes(s.id)).map((skin, idx) => {
                   let price = skin.price || (skin.rarity === 'legendary' ? 10000 : skin.rarity === 'epic' ? 5000 : skin.rarity === 'rare' ? 2500 : 1000);
                   const currency = skin.currency || 'coins';
                   const userBalance = currency === 'coins' ? user.coins : user.monedas;
@@ -1759,7 +1759,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                   
                   return (
                     <button
-                      key={skin.id}
+                      key={`shop-skin-${skin.id}-${idx}`}
                       onClick={() => handleBuy(skin, price)}
                       disabled={userBalance < price}
                       className={`group relative flex flex-col items-center rounded-2xl border-2 border-gray-700 bg-gray-800 p-4 transition-all hover:border-yellow-500 disabled:opacity-50`}
@@ -1792,9 +1792,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 {[
                   { points: 1000, cost: 100 },
                   { points: 2000, cost: 175 }
-                ].map((pkg) => (
+                ].map((pkg, idx) => (
                   <button
-                    key={`shop-exchange-pkg-${pkg.points}`}
+                    key={`shop-exchange-pkg-${pkg.points}-${idx}`}
                     onClick={() => handleExchangePoints(pkg.points, pkg.cost)}
                     disabled={user.monedas < pkg.cost}
                     className="group relative flex items-center justify-between rounded-2xl border border-white/5 bg-white/5 p-6 transition-all hover:bg-blue-600/20 hover:border-blue-500/50 disabled:opacity-30"
@@ -1985,7 +1985,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
 
                   return (
                     <button
-                      key={`wager-${selectedCategory}-${val}`}
+                      key={`wager-${selectedCategory}-${val}-${idx}`}
                       onClick={() => {
                         if (isLocked) {
                           setTicketMessage({ text: `Debes comprar la entrada ${selectedCategory.toUpperCase()} en la tienda`, type: 'error' });
@@ -2677,9 +2677,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 </div>
               </motion.div>
             )}
-            {notifications.map(notif => (
+            {notifications.map((notif, idx) => (
               <motion.div
-                key={`notif-${notif.id}`}
+                key={`notif-${notif.id}-${idx}`}
                 initial={{ x: 100, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
                 exit={{ x: 100, opacity: 0 }}

@@ -38,6 +38,7 @@ export interface PlayerSession {
   hasAura?: boolean;
   auraType?: 'fire' | 'ice';
   serverId?: string;
+  activePowerUps?: Record<string, number>; // type -> expiry timestamp
 }
 
 export interface Food {
@@ -47,6 +48,16 @@ export interface Food {
   value: number;
   type: 'normal' | 'gold' | 'speed' | 'star' | 'dropped';
   color: string;
+  serverId?: string;
+}
+
+export type PowerUpType = 'magnet' | 'shield' | 'turbo' | 'ghost';
+
+export interface PowerUp {
+  id: string;
+  x: number;
+  y: number;
+  type: PowerUpType;
   serverId?: string;
 }
 

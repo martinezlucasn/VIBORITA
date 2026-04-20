@@ -31,12 +31,13 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [customAmounts, setCustomAmounts] = useState<Record<string, string>>({});
-  const [activeTab, setActiveTab] = useState<'users' | 'withdrawals' | 'webhooks' | 'payments'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'withdrawals' | 'webhooks' | 'payments' | 'bridge'>('users');
   const [withdrawalFilter, setWithdrawalFilter] = useState<'all' | 'pending' | 'completed'>('all');
   const [transactionIds, setTransactionIds] = useState<Record<string, string>>({});
   const [selectedWithdrawal, setSelectedWithdrawal] = useState<WithdrawalRequest | null>(null);
   const [webhooks, setWebhooks] = useState<any[]>([]);
   const [processedPayments, setProcessedPayments] = useState<any[]>([]);
+  const [bridgeNotifications, setBridgeNotifications] = useState<any[]>([]);
 
   useEffect(() => {
     setLoading(true);
@@ -89,11 +90,23 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
       console.error("Error fetching processed payments:", e);
     });
 
+    const qBridge = query(collection(db, 'payment_notifications'), orderBy('received_at', 'desc'), limit(50));
+    const unsubBridge = onSnapshot(qBridge, (snapshot) => {
+      const notes = snapshot.docs.map(doc => ({ 
+        firestoreId: doc.id, 
+        ...doc.data() 
+      }));
+      setBridgeNotifications(notes);
+    }, (e) => {
+      console.error("Error fetching bridge notifications:", e);
+    });
+
     return () => {
       unsubUsers();
       unsubWithdrawals();
       unsubWebhooks();
       unsubPayments();
+      unsubBridge();
     };
   }, []);
 
@@ -220,6 +233,12 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                 className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition-all ${activeTab === 'payments' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white'}`}
               >
                 <CreditCard size={18} /> Pagos
+              </button>
+              <button 
+                onClick={() => setActiveTab('bridge')}
+                className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition-all ${activeTab === 'bridge' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white'}`}
+              >
+                <RefreshCw size={18} /> Puente
               </button>
             </div>
 
@@ -369,7 +388,7 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                   const matchesFilter = withdrawalFilter === 'all' || w.status === withdrawalFilter;
                   return matchesSearch && matchesFilter;
                 }).map((w: any, idx) => (
-                  <div key={`admin-withdraw-${w.firestoreId || idx}`} className={`rounded-2xl border p-4 transition-all ${w.status === 'pending' ? 'border-blue-500/30 bg-blue-500/5' : 'border-white/5 bg-gray-800/40'}`}>
+                  <div key={`admin-withdraw-${w.id || w.firestoreId || idx}-${idx}`} className={`rounded-2xl border p-4 transition-all ${w.status === 'pending' ? 'border-blue-500/30 bg-blue-500/5' : 'border-white/5 bg-gray-800/40'}`}>
                     <div className="mb-4 flex items-start justify-between">
                       <div>
                         <div className="flex items-center gap-2">
@@ -441,7 +460,7 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                   </p>
                 </div>
                 {processedPayments.map((p, idx) => (
-                  <div key={`admin-paid-${p.firestoreId || p.id || idx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
+                  <div key={`admin-paid-${p.firestoreId || p.id || idx}-${idx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
                         <span className="rounded-full bg-green-500/20 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-green-400">
@@ -474,6 +493,46 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                   </div>
                 )}
               </div>
+            ) : activeTab === 'bridge' ? (
+              <div className="space-y-4">
+                <div className="rounded-2xl bg-yellow-500/10 p-4 border border-yellow-500/20 mb-4">
+                  <p className="text-[10px] text-yellow-500 leading-relaxed font-bold uppercase tracking-widest">
+                    ⚠️ Estas notificaciones provienen del puente en Google Cloud Run. Si ves una con 'Procesado: SI', el servidor del juego ya la validó.
+                  </p>
+                </div>
+                {bridgeNotifications.map((n, idx) => (
+                  <div key={`admin-bridge-${n.firestoreId || idx}-${idx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`h-2 w-2 rounded-full ${n.processed ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`} />
+                        <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">BRIDGE ID: {n.payment_id}</span>
+                      </div>
+                      <span className="text-[10px] text-gray-500">{(n.received_at as any)?.toDate?.().toLocaleString() || 'Ahora'}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="text-left">
+                        <p className="text-[10px] text-gray-500 uppercase tracking-tighter">Procesado</p>
+                        <p className={`text-xs font-black ${n.processed ? 'text-green-400' : 'text-yellow-500'}`}>
+                          {n.processed ? 'SI' : 'PENDIENTE'}
+                        </p>
+                      </div>
+                      {n.error && (
+                        <div className="text-right">
+                          <p className="text-[10px] text-red-500 uppercase tracking-tighter">Error</p>
+                          <p className="text-[10px] text-red-400 italic max-w-[150px] truncate">{n.error}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {bridgeNotifications.length === 0 && (
+                  <div className="flex flex-col items-center justify-center py-20 text-gray-500">
+                    <RefreshCw size={48} className="mb-4 opacity-20" />
+                    <p className="font-bold uppercase tracking-widest">No hay notificaciones del puente</p>
+                    <p className="text-xs">Usa el simulador de Mercado Pago para probar.</p>
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="space-y-3 overflow-y-auto max-h-[50vh] pr-2 custom-scrollbar">
                 <div className="mb-4 rounded-xl bg-blue-500/10 p-4 border border-blue-500/20">
@@ -482,7 +541,7 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                   </p>
                 </div>
                 {webhooks.map((w, idx) => (
-                  <div key={`admin-hook-${w.firestoreId || idx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
+                  <div key={`admin-hook-${w.firestoreId || idx}-${idx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
                     <div className="flex items-center justify-between mb-2">
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${w.topic === 'payment' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'}`}>
                         {w.topic || 'Desconocido'}
