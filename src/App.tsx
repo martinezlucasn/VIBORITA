@@ -188,10 +188,21 @@ export default function App() {
 
   const handleLogin = async () => {
     const provider = new GoogleAuthProvider();
+    
+    // Si estamos en una plataforma nativa (APK), signInWithPopup no funcionará directamente.
+    // Se requiere el uso de @capacitor-community/google-auth para un login real en Android.
+    if (Capacitor.isNativePlatform()) {
+      console.warn('Ejecutando en plataforma nativa. Asegúrate de configurar el plugin nativo de Google Auth.');
+      // Por ahora, intentamos el flujo normal, pero en producción APK se debe usar el SDK Nativo.
+    }
+
     try {
       await signInWithPopup(auth, provider);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Login error:', error);
+      if (Capacitor.isNativePlatform() && error.code === 'auth/operation-not-supported-in-this-environment') {
+        alert('El inicio de sesión de Google en Android requiere configuración del plugin nativo Capacitor Google Auth.');
+      }
     }
   };
 
