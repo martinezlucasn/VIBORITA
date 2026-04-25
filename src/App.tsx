@@ -28,21 +28,27 @@ export default function App() {
 
   useEffect(() => {
     const initFB = async () => {
+      const timeout = setTimeout(() => {
+        console.warn("FBInstant initialization timed out - continuing anyway");
+        setFbReady(true);
+      }, 5000);
+
       if (typeof FBInstant !== 'undefined') {
         try {
           await FBInstant.initializeAsync();
-          // Here you could load assets if needed
-          // FBInstant.setLoadingProgress(100);
+          FBInstant.setLoadingProgress(100);
           await FBInstant.startGameAsync();
           console.log("Juego iniciado en Facebook Instant Games");
+          clearTimeout(timeout);
           setFbReady(true);
         } catch (error) {
           console.error("Error inicializando FBInstant:", error);
-          // Still set ready so app can continue if it fails but isn't strictly required for local dev
+          clearTimeout(timeout);
           setFbReady(true);
         }
       } else {
         // Not running in FB environment
+        clearTimeout(timeout);
         setFbReady(true);
       }
     };

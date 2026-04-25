@@ -1,6 +1,7 @@
 {
   "instant_games": {
-    "platform_version": "6.3",
+    "platform_version": "7.1",
+    "navigation_menu_version": "NAV_FLOATING",
     "orientation": "PORTRAIT"
   }
 }
