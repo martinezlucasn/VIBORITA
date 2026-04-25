@@ -14,7 +14,10 @@
         "highScoreMonedas": { "type": "number" },
         "lastActive": { "type": "number" },
         "proAccessUntil": { "type": "number" },
-        "millonarioAccessUntil": { "type": "number" }
+        "millonarioAccessUntil": { "type": "number" },
+        "inventoryItems": { "type": "object" },
+        "inventoryAbilities": { "type": "object" },
+        "equippedAbilities": { "type": "array", "items": { "type": "string" } }
       },
       "required": ["displayName", "coins"]
     },
@@ -168,6 +171,34 @@
         "status": { "type": "string", "enum": ["open", "closed"] }
       },
       "required": ["id", "creatorId", "wager", "createdAt", "status"]
+    },
+    "SkinListing": {
+      "title": "SkinListing",
+      "description": "Skin listings in the marketplace",
+      "type": "object",
+      "properties": {
+        "sellerId": { "type": "string" },
+        "sellerName": { "type": "string" },
+        "skinId": { "type": "string" },
+        "price": { "type": "number" },
+        "timestamp": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "sold"] }
+      },
+      "required": ["sellerId", "sellerName", "skinId", "price", "timestamp", "status"]
+    },
+    "AbilityListing": {
+      "title": "AbilityListing",
+      "description": "Ability listings in the marketplace",
+      "type": "object",
+      "properties": {
+        "sellerId": { "type": "string" },
+        "sellerName": { "type": "string" },
+        "abilityId": { "type": "string" },
+        "price": { "type": "number" },
+        "timestamp": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "sold"] }
+      },
+      "required": ["sellerId", "sellerName", "abilityId", "price", "timestamp", "status"]
     }
   },
   "firestore": {
@@ -214,6 +245,14 @@
     "/privateRooms/{roomId}": {
       "schema": "PrivateRoom",
       "description": "Private game rooms"
+    },
+    "/skinSales/{listingId}": {
+      "schema": "SkinListing",
+      "description": "Skin marketplace listings"
+    },
+    "/abilitySales/{listingId}": {
+      "schema": "AbilityListing",
+      "description": "Ability marketplace listings"
     }
   }
 }

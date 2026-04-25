@@ -24,6 +24,31 @@ export default function App() {
   const [quotaExceeded, setQuotaExceeded] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
+  const [fbReady, setFbReady] = useState(false);
+
+  useEffect(() => {
+    const initFB = async () => {
+      if (typeof FBInstant !== 'undefined') {
+        try {
+          await FBInstant.initializeAsync();
+          // Here you could load assets if needed
+          // FBInstant.setLoadingProgress(100);
+          await FBInstant.startGameAsync();
+          console.log("Juego iniciado en Facebook Instant Games");
+          setFbReady(true);
+        } catch (error) {
+          console.error("Error inicializando FBInstant:", error);
+          // Still set ready so app can continue if it fails but isn't strictly required for local dev
+          setFbReady(true);
+        }
+      } else {
+        // Not running in FB environment
+        setFbReady(true);
+      }
+    };
+
+    initFB();
+  }, []);
 
   useEffect(() => {
     // Hide status bar for full screen experience
@@ -99,40 +124,45 @@ export default function App() {
                 highScoreMonedas: 0,
                 ownedSkins: ['default'],
                 equippedSkin: 'default',
+                equippedAbilities: [],
+                inventoryAbilities: {},
                 highScore: 0,
                 lastActive: Date.now()
               };
               
-              setDoc(userDocRef, newUser)
-                .catch(e => handleFirestoreError(e, OperationType.CREATE, 'users/' + firebaseUser.uid));
-                
-              // Create Supabase profile
-              (async () => {
-                try {
-                  await supabase.from('profiles').upsert({
-                    id: firebaseUser.uid,
-                    display_name: newUser.displayName,
-                    email: newUser.email.toLowerCase(),
-                    coins: newUser.coins,
-                    monedas: newUser.monedas,
-                    equipped_skin: newUser.equippedSkin,
-                    high_score: newUser.highScore,
-                    high_score_monedas: newUser.highScoreMonedas,
-                    last_active: new Date(newUser.lastActive).toISOString(),
-                    created_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString()
-                  });
+              // Only create if we are not in the middle of a deletion
+              if (!sessionStorage.getItem('deleting_account')) {
+                setDoc(userDocRef, newUser, { merge: true })
+                  .catch(e => handleFirestoreError(e, OperationType.CREATE, 'users/' + firebaseUser.uid));
+                  
+                // Create Supabase profile
+                (async () => {
+                  try {
+                    await supabase.from('profiles').upsert({
+                      id: firebaseUser.uid,
+                      display_name: newUser.displayName,
+                      email: newUser.email.toLowerCase(),
+                      coins: newUser.coins,
+                      monedas: newUser.monedas,
+                      equipped_skin: newUser.equippedSkin,
+                      high_score: newUser.highScore,
+                      high_score_monedas: newUser.highScoreMonedas,
+                      last_active: new Date(newUser.lastActive).toISOString(),
+                      created_at: new Date().toISOString(),
+                      updated_at: new Date().toISOString()
+                    });
 
-                  // Add initial skin to inventory
-                  await supabase.from('inventory').upsert({
-                    user_id: firebaseUser.uid,
-                    skin_id: 'default',
-                    acquired_at: new Date().toISOString()
-                  });
-                } catch (err) {
-                  console.error("Error syncing with Supabase on creation:", err);
-                }
-              })();
+                    // Add initial skin to inventory
+                    await supabase.from('inventory').upsert({
+                      user_id: firebaseUser.uid,
+                      skin_id: 'default',
+                      acquired_at: new Date().toISOString()
+                    });
+                  } catch (err) {
+                    console.error("Error syncing with Supabase on creation:", err);
+                  }
+                })();
+              }
 
               return newUser;
             });
@@ -205,7 +235,7 @@ export default function App() {
     setGameState('wager');
   };
 
-  if (loading) {
+  if (loading || !fbReady) {
     return (
       <div className="flex h-screen w-screen flex-col items-center justify-center bg-[#05070a]">
         <motion.div
@@ -400,6 +430,7 @@ export default function App() {
       <AnimatePresence>
         {quotaExceeded && (
           <motion.div
+            key="quota-notice"
             initial={{ y: -100 }}
             animate={{ y: 0 }}
             exit={{ y: -100 }}

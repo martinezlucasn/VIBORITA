@@ -3,11 +3,17 @@ import { db } from '../firebase';
 
 export const MAX_SERVER_PLAYERS = 30;
 
-export async function findAvailableServer(collectionName: string = 'arenaPlayers'): Promise<string> {
+export async function findAvailableServer(collectionName: string = 'arenaPlayers', category?: string): Promise<string> {
   let serverIndex = 1;
   
   while (true) {
-    const prefix = collectionName === 'wagerPlayers' ? 'wager_' : 'server_';
+    let prefix = '';
+    if (collectionName === 'wagerPlayers') {
+      prefix = category ? `${category}_` : 'wager_';
+    } else {
+      prefix = 'server_';
+    }
+    
     const serverId = `${prefix}${serverIndex}`;
     const sixtySecondsAgo = Date.now() - 60000;
     const q = query(
@@ -24,6 +30,6 @@ export async function findAvailableServer(collectionName: string = 'arenaPlayers
     
     serverIndex++;
     // Safety break
-    if (serverIndex > 100) return 'server_overflow';
+    if (serverIndex > 100) return 'server_id_overflow';
   }
 }

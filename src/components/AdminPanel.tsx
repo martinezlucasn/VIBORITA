@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import { User } from '../types';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import { collection, query, getDocs, doc, updateDoc, increment, where, orderBy, addDoc, serverTimestamp, onSnapshot, limit } from 'firebase/firestore';
+import { collection, query, getDocs, doc, updateDoc, increment, where, orderBy, addDoc, serverTimestamp, onSnapshot, limit, deleteDoc } from 'firebase/firestore';
 import { supabase } from '../lib/supabase';
-import { X, Search, ShieldCheck, Coins, Zap, Save, RefreshCw, CreditCard, CheckCircle2, History, Users, Info, CircleAlert, MessageSquare } from 'lucide-react';
+import { X, Search, ShieldCheck, Coins, Zap, Save, RefreshCw, CreditCard, CheckCircle2, History, Users, Info, CircleAlert, MessageSquare, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoldPointIcon, MonedasIcon } from './Icons';
 
@@ -31,12 +31,10 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [customAmounts, setCustomAmounts] = useState<Record<string, string>>({});
-  const [activeTab, setActiveTab] = useState<'users' | 'withdrawals' | 'webhooks' | 'payments' | 'bridge'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'withdrawals' | 'bridge'>('users');
   const [withdrawalFilter, setWithdrawalFilter] = useState<'all' | 'pending' | 'completed'>('all');
   const [transactionIds, setTransactionIds] = useState<Record<string, string>>({});
   const [selectedWithdrawal, setSelectedWithdrawal] = useState<WithdrawalRequest | null>(null);
-  const [webhooks, setWebhooks] = useState<any[]>([]);
-  const [processedPayments, setProcessedPayments] = useState<any[]>([]);
   const [bridgeNotifications, setBridgeNotifications] = useState<any[]>([]);
 
   useEffect(() => {
@@ -66,30 +64,6 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
       handleFirestoreError(e, OperationType.LIST, 'withdrawals');
     });
 
-    const qWebhooks = query(collection(db, 'webhook_logs'), orderBy('timestamp', 'desc'), limit(50));
-    const unsubWebhooks = onSnapshot(qWebhooks, (snapshot) => {
-      const logs = snapshot.docs.map(doc => ({ 
-        firestoreId: doc.id, 
-        uid: doc.id,
-        ...doc.data() 
-      }));
-      setWebhooks(logs);
-    }, (e) => {
-      console.error("Error fetching webhooks:", e);
-    });
-
-    const qPayments = query(collection(db, 'processed_payments'), orderBy('timestamp', 'desc'), limit(50));
-    const unsubPayments = onSnapshot(qPayments, (snapshot) => {
-      const payments = snapshot.docs.map(doc => ({ 
-        firestoreId: doc.id, 
-        uid: doc.id,
-        ...doc.data() 
-      }));
-      setProcessedPayments(payments);
-    }, (e) => {
-      console.error("Error fetching processed payments:", e);
-    });
-
     const qBridge = query(collection(db, 'payment_notifications'), orderBy('received_at', 'desc'), limit(50));
     const unsubBridge = onSnapshot(qBridge, (snapshot) => {
       const notes = snapshot.docs.map(doc => ({ 
@@ -104,8 +78,6 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
     return () => {
       unsubUsers();
       unsubWithdrawals();
-      unsubWebhooks();
-      unsubPayments();
       unsubBridge();
     };
   }, []);
@@ -180,6 +152,30 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
     setTimeout(() => setMessage(null), 3000);
   };
 
+  const handleClearAllWithdrawals = async () => {
+    if (!window.confirm('¿Estás seguro de borrar COMPLETAMENTE el historial de retiros? Esta acción no se puede deshacer.')) return;
+    
+    setLoading(true);
+    try {
+      const q = query(collection(db, 'withdrawals'));
+      const snapshot = await getDocs(q);
+      
+      const deletePromises = snapshot.docs.map(doc => deleteDoc(doc.ref));
+      await Promise.all(deletePromises);
+      
+      // Also clear in Supabase if entries exist
+      await supabase.from('withdrawals').delete().neq('status', 'none');
+
+      setMessage({ text: 'Historial de retiros borrado por completo', type: 'success' });
+    } catch (e) {
+      setMessage({ text: 'Error al borrar historial', type: 'error' });
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+    setTimeout(() => setMessage(null), 3000);
+  };
+
   const filteredUsers = users.filter(u => 
     u.displayName.toLowerCase().includes(search.toLowerCase()) || 
     (u.email && u.email.toLowerCase().includes(search.toLowerCase()))
@@ -221,18 +217,6 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                 className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition-all ${activeTab === 'withdrawals' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white'}`}
               >
                 <CreditCard size={18} /> Retiros
-              </button>
-              <button 
-                onClick={() => setActiveTab('webhooks')}
-                className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition-all ${activeTab === 'webhooks' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white'}`}
-              >
-                <History size={18} /> Webhooks
-              </button>
-              <button 
-                onClick={() => setActiveTab('payments')}
-                className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition-all ${activeTab === 'payments' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white'}`}
-              >
-                <CreditCard size={18} /> Pagos
               </button>
               <button 
                 onClick={() => setActiveTab('bridge')}
@@ -365,20 +349,30 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
               </div>
             ) : activeTab === 'withdrawals' ? (
               <div className="space-y-3">
-                <div className="flex gap-2 mb-4">
-                  {(['all', 'pending', 'completed'] as const).map((f) => (
-                    <button
-                      key={f}
-                      onClick={() => setWithdrawalFilter(f)}
-                      className={`rounded-xl px-4 py-2 text-[10px] font-black uppercase tracking-widest transition-all ${
-                        withdrawalFilter === f 
-                          ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
-                          : 'bg-gray-800 text-gray-400 hover:text-white'
-                      }`}
-                    >
-                      {f === 'all' ? 'Todos' : f === 'pending' ? 'Pendientes' : 'Completados'}
-                    </button>
-                  ))}
+                <div className="flex items-center justify-between gap-4 mb-4">
+                  <div className="flex gap-2">
+                    {(['all', 'pending', 'completed'] as const).map((f) => (
+                      <button
+                        key={f}
+                        onClick={() => setWithdrawalFilter(f)}
+                        className={`rounded-xl px-4 py-2 text-[10px] font-black uppercase tracking-widest transition-all ${
+                          withdrawalFilter === f 
+                            ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
+                            : 'bg-gray-800 text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        {f === 'all' ? 'Todos' : f === 'pending' ? 'Pendientes' : 'Completados'}
+                      </button>
+                    ))}
+                  </div>
+                  
+                  <button 
+                    onClick={handleClearAllWithdrawals}
+                    disabled={loading || withdrawals.length === 0}
+                    className="flex items-center gap-2 rounded-xl bg-red-600/10 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-red-500 hover:bg-red-600/20 transition-all border border-red-500/20 disabled:opacity-30"
+                  >
+                    <Trash2 size={14} /> Borrar Todo
+                  </button>
                 </div>
 
                 {withdrawals.filter(w => {
@@ -452,54 +446,8 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                   </div>
                 )}
               </div>
-            ) : activeTab === 'payments' ? (
-              <div className="space-y-3 overflow-y-auto max-h-[50vh] pr-2 custom-scrollbar">
-                <div className="mb-4 rounded-xl bg-blue-500/10 p-4 border border-blue-500/20">
-                  <p className="text-xs text-blue-300">
-                    Historial de pagos detectados. Los 'Acreditados' ya sumaron saldo al usuario, los 'Pendientes' están esperando confirmación de Mercado Pago.
-                  </p>
-                </div>
-                {processedPayments.map((p, idx) => (
-                  <div key={`admin-paid-${p.firestoreId || p.id || idx}-${idx}`} className={`rounded-2xl border p-4 ${p.status === 'pending' ? 'border-yellow-500/20 bg-yellow-500/5' : 'border-white/5 bg-gray-800/40'}`}>
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${p.status === 'pending' ? 'bg-yellow-500/20 text-yellow-500' : 'bg-green-500/20 text-green-400'}`}>
-                          {p.status === 'pending' ? 'Pendiente' : 'Acreditado'}
-                        </span>
-                        <span className="text-[10px] font-bold text-gray-500 uppercase">{p.purchaseType || 'monedas'}</span>
-                      </div>
-                      <span className="text-[10px] text-gray-500">{p.timestamp ? new Date(p.timestamp.seconds * 1000).toLocaleString() : 'Reciente'}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-black text-white">Usuario: {users.find(u => u.id === p.userId)?.displayName || p.userId}</p>
-                        <p className="text-[10px] font-mono text-gray-500">ID Pago: {p.id}</p>
-                      </div>
-                      <div className="text-right">
-                        <div className="flex items-center gap-1 text-lg font-black text-white">
-                          +{p.amount} {p.purchaseType === 'points' ? <GoldPointIcon size={16} /> : <MonedasIcon size={16} />}
-                        </div>
-                        {p.pointsAdded > 0 && p.purchaseType !== 'points' && (
-                          <p className="text-[10px] font-bold text-yellow-500">+{p.pointsAdded} Puntos (Bono)</p>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-                {processedPayments.length === 0 && (
-                  <div className="flex flex-col items-center justify-center py-20 text-gray-500">
-                    <CreditCard size={48} className="mb-4 opacity-20" />
-                    <p className="font-bold uppercase tracking-widest">No hay pagos procesados</p>
-                  </div>
-                )}
-              </div>
             ) : activeTab === 'bridge' ? (
               <div className="space-y-4">
-                <div className="rounded-2xl bg-yellow-500/10 p-4 border border-yellow-500/20 mb-4">
-                  <p className="text-[10px] text-yellow-500 leading-relaxed font-bold uppercase tracking-widest">
-                    ⚠️ Estas notificaciones provienen del puente en Google Cloud Run. Si ves una con 'Procesado: SI', el servidor del juego ya la validó.
-                  </p>
-                </div>
                 {bridgeNotifications.map((n, idx) => (
                   <div key={`admin-bridge-${n.firestoreId || idx}-${idx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
                     <div className="flex items-center justify-between mb-2">
@@ -534,33 +482,9 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                 )}
               </div>
             ) : (
-              <div className="space-y-3 overflow-y-auto max-h-[50vh] pr-2 custom-scrollbar">
-                <div className="mb-4 rounded-xl bg-blue-500/10 p-4 border border-blue-500/20">
-                  <p className="text-xs text-blue-300">
-                    Aquí se muestran los últimos 50 eventos de Mercado Pago. Útil para verificar si las notificaciones están llegando al servidor.
-                  </p>
-                </div>
-                {webhooks.map((w, idx) => (
-                  <div key={`admin-hook-${w.firestoreId || idx}-${idx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${w.topic === 'payment' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'}`}>
-                        {w.topic || 'Desconocido'}
-                      </span>
-                      <span className="text-[10px] text-gray-500">{w.timestamp ? new Date(w.timestamp.seconds * 1000).toLocaleString() : 'Reciente'}</span>
-                    </div>
-                    <p className="text-[10px] font-mono text-gray-500 mb-2">ID: {w.id}</p>
-                    <div className="rounded-lg bg-black/30 p-3 text-[10px] font-mono text-gray-400 overflow-x-auto">
-                      <pre>{JSON.stringify(w.body || w.query, null, 2)}</pre>
-                    </div>
-                  </div>
-                ))}
-                {webhooks.length === 0 && (
-                  <div className="flex flex-col items-center justify-center py-20 text-gray-500">
-                    <History size={48} className="mb-4 opacity-20" />
-                    <p className="font-bold uppercase tracking-widest">No hay webhooks registrados</p>
-                    <p className="text-xs">Los pagos aparecerán aquí cuando Mercado Pago envíe la notificación.</p>
-                  </div>
-                )}
+              <div className="flex flex-col items-center justify-center py-20 text-gray-500">
+                <ShieldCheck size={48} className="mb-4 opacity-20" />
+                <p className="font-bold uppercase tracking-widest">Selecciona una pestaña</p>
               </div>
             )}
           </div>

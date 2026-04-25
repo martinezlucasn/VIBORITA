@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, TouchEvent } from 'react';
-import { User, PlayerSession, Food, Point } from '../types';
+import { User, PlayerSession, Food, Point, ArenaItemEntity } from '../types';
 import { WORLD_W, WORLD_H, BASE_SPEED, CELL, ALL_SKINS, SEGMENT_DISTANCE } from '../constants';
+import { ARENA_ITEMS } from '../items';
+import { ALL_ABILITIES } from '../abilities';
+import { GoldPointIcon } from './Icons';
 import { doc, updateDoc, increment, setDoc, onSnapshot, collection, query, where, deleteDoc, addDoc, getDocs, getDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { motion, AnimatePresence } from 'motion/react';
@@ -47,15 +50,89 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
   const lastTapRef = useRef<number>(0);
   const boostTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isTouchBoostingRef = useRef(false);
+
+  // Abilities state
+  const [isStopped, setIsStopped] = useState(false);
+  const [isAutopilot, setIsAutopilot] = useState(false);
+  const [isInvulnerable, setIsInvulnerable] = useState(false);
+  const [lastTeleportTime, setLastTeleportTime] = useState(0);
+  const [floatingTexts, setFloatingTexts] = useState<{ id: string; x: number; y: number; text: string; color: string; opacity: number }[]>([]);
+  const equippedAbilities = user.equippedAbilities || [];
+  const hasZoom = equippedAbilities.includes('zoom');
+  const hasMagnet = equippedAbilities.includes('magnet');
+  const hasTeleport = equippedAbilities.includes('teleport');
+  const hasStop = equippedAbilities.includes('stop');
+  const hasAutopilot = equippedAbilities.includes('autopilot');
+
+  const handleTeleport = async () => {
+    if (!hasTeleport || user.coins < 250) return;
+    const now = Date.now();
+    if (now - lastTeleportTime < 180000) return; // 3 min
+
+    // Cost (to saldo)
+    try {
+      const userRef = doc(db, 'users', user.id);
+      await updateDoc(userRef, {
+        coins: increment(-250)
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${user.id}`);
+      return;
+    }
+
+    setLastTeleportTime(now);
+    
+    // Add floating text above the button
+    const textId = Math.random().toString(36).substr(2, 9);
+    setFloatingTexts(prev => [...prev, {
+      id: textId,
+      x: 20,
+      y: window.innerHeight - 100,
+      text: '-250 Puntos',
+      color: '#fbbf24',
+      opacity: 1
+    }]);
+
+    soundManager.play('star'); // Flash sound
+    
+    // Jump effect (invulnerability)
+    setIsInvulnerable(true);
+    setTimeout(() => setIsInvulnerable(false), 3000);
+    
+    // Find safe spot
+    const newPos = {
+      x: 100 + Math.random() * (worldW - 200),
+      y: 100 + Math.random() * (worldH - 200)
+    };
+    
+    playerRef.current.segments = playerRef.current.segments.map(() => ({ ...newPos }));
+    cameraRef.current.x = newPos.x;
+    cameraRef.current.y = newPos.y;
+  };
   
   const startX = Math.random() * worldW;
   const startY = Math.random() * worldH;
+
+  // Calculate initial segments based on wager level (1-4)
+  const getInitialSegmentsLength = () => {
+    const bets = {
+      basica: [50, 100, 150, 200],
+      pro: [500, 1000, 2000, 3000],
+      millonario: [5000, 7500, 10000, 15000]
+    };
+    const categoryBets = bets[category as keyof typeof bets] || bets.basica;
+    const wagerIndex = categoryBets.indexOf(wager);
+    const growthScale = [12, 24, 36, 60];
+    return growthScale[wagerIndex] !== undefined ? growthScale[wagerIndex] : 12;
+  };
+
+  const initialSegCount = getInitialSegmentsLength();
 
   const playerRef = useRef<PlayerSession>({
     id: user.id,
     userId: user.id,
     displayName: user.displayName,
-    segments: Array.from({ length: 10 + Math.floor(growthWager * 3) }, (_, i) => ({ x: startX - i * SEGMENT_DISTANCE, y: startY })),
+    segments: Array.from({ length: initialSegCount }, (_, i) => ({ x: startX - i * SEGMENT_DISTANCE, y: startY })),
     angle: 0,
     wager: wager,
     isAlive: true,
@@ -71,6 +148,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
 
   const otherPlayersRef = useRef<Record<string, PlayerSession>>({});
   const interpolatedPlayersRef = useRef<Record<string, PlayerSession>>({});
+  const itemsRef = useRef<Record<string, ArenaItemEntity>>({});
   const droppedCoinsRef = useRef<Food[]>([]);
   const mouseRef = useRef<Point>({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
   const cameraRef = useRef({ x: worldW / 2, y: worldH / 2, zoom: 1 });
@@ -95,7 +173,8 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
 
   useEffect(() => {
     const initServer = async () => {
-      const id = await findAvailableServer('wagerPlayers');
+      // Pass category to findAvailableServer to ensure isolation
+      const id = await findAvailableServer('wagerPlayers', category);
       setServerId(id);
       playerRef.current.serverId = id;
 
@@ -109,16 +188,17 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
 
       socket.on("connect", () => {
         console.log(`Connected to WebSocket server (Wager - ${category})`);
-        // Use a prefix for the serverId based on category to separate players
-        const categoryServerId = `${category}_${id}`;
+        // The serverId is already prefixed by findAvailableServer
         socket.emit("join_arena", {
+          id: user.id,
           displayName: user.displayName,
           equippedSkin: user.equippedSkin,
           hasAura: playerRef.current.hasAura,
           auraType: playerRef.current.auraType,
-          serverId: categoryServerId,
+          serverId: id,
           wager: playerRef.current.wager,
-          category: category
+          category: category,
+          mode: 'wager'
         });
       });
 
@@ -187,8 +267,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     // 2. Listen for dropped coins in Firestore
     const coinsQuery = query(
       collection(db, 'wagerCoins'), 
-      where('serverId', '==', serverId),
-      where('category', '==', category)
+      where('serverId', '==', serverId)
     );
     const unsubCoins = onSnapshot(coinsQuery, (snapshot) => {
       const coins: Food[] = [];
@@ -197,6 +276,48 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       });
       droppedCoinsRef.current = coins;
     }, (e) => handleFirestoreError(e, OperationType.LIST, 'wagerCoins'));
+
+    // 2.5 Listen for arena items
+    const itemsQuery = query(collection(db, 'arenaItems'), where('serverId', '==', serverId));
+    const unsubItems = onSnapshot(itemsQuery, (snapshot) => {
+      const newItems: Record<string, ArenaItemEntity> = {};
+      snapshot.forEach((doc) => {
+        newItems[doc.id] = { id: doc.id, ...doc.data() } as ArenaItemEntity;
+      });
+      itemsRef.current = newItems;
+
+      // Arena items spawning logic: Keep at least 6 items in wager arenas
+      if (snapshot.size < 6) {
+        const spawnCount = 6 - snapshot.size;
+        for (let i = 0; i < spawnCount; i++) {
+          const rand = Math.random();
+          let rarity: 'common' | 'rare' | 'epic' | 'legendary' = 'common';
+          if (rand > 0.98) rarity = 'legendary';
+          else if (rand > 0.90) rarity = 'epic';
+          else if (rand > 0.70) rarity = 'rare';
+
+          // 20% chance for ability fragments
+          const isFragmentChance = Math.random() < 0.20;
+          let candidates = ARENA_ITEMS.filter(item => 
+            item.rarity === rarity && 
+            (isFragmentChance ? item.id.startsWith('frag_') : !item.id.startsWith('frag_'))
+          );
+          
+          if (candidates.length === 0) {
+            candidates = ARENA_ITEMS.filter(item => item.rarity === rarity);
+          }
+          
+          const chosenItem = candidates[Math.floor(Math.random() * candidates.length)];
+
+          addDoc(collection(db, 'arenaItems'), {
+            x: Math.random() * worldW,
+            y: Math.random() * worldH,
+            itemId: chosenItem.id,
+            serverId
+          }).catch(() => {});
+        }
+      }
+    }, (e) => handleFirestoreError(e, OperationType.LIST, 'arenaItems'));
 
     // 3. Lazy cleanup of expired coins
     const cleanupInterval = setInterval(async () => {
@@ -270,7 +391,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
 
       if (isAlive && playerRef.current.isAlive) {
         updatePlayer(dt);
-        checkCollisions();
+        checkCollisions(dt);
         
         // Smooth other players movement locally (Interpolation)
         (Object.values(otherPlayersRef.current) as PlayerSession[]).forEach(target => {
@@ -361,9 +482,39 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       playerRef.current.angle += diff * Math.min(1, 8 * dt);
     }
 
-    const speed = isBoosting ? BASE_SPEED * 2 : BASE_SPEED;
-    playerRef.current.isBoosting = isBoosting;
-    if (isBoosting) {
+    const speed = isStopped ? 0 : (isBoosting ? BASE_SPEED * 2 : BASE_SPEED);
+    playerRef.current.isBoosting = isBoosting && !isStopped;
+    
+    // Autopilot logic
+    if (isAutopilot && !isStopped) {
+      let nearestFood: {x: number, y: number} | null = null;
+      let minDist = 300;
+      droppedCoinsRef.current.forEach(f => {
+        const d = Math.sqrt((head.x - f.x) ** 2 + (head.y - f.y) ** 2);
+        if (d < minDist) {
+          minDist = d;
+          nearestFood = f;
+        }
+      });
+      if (nearestFood) {
+        const dxT = nearestFood.x - head.x;
+        const dyT = nearestFood.y - head.y;
+        const targetAngle = Math.atan2(dyT, dxT);
+        let diff = targetAngle - playerRef.current.angle;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        playerRef.current.angle += diff * Math.min(1, 5 * dt);
+      }
+      // Wall avoidance
+      const lookAhead = 100;
+      const futureX = head.x + Math.cos(playerRef.current.angle) * lookAhead;
+      const futureY = head.y + Math.sin(playerRef.current.angle) * lookAhead;
+      if (futureX < 50 || futureX > worldW - 50 || futureY < 50 || futureY > worldH - 50) {
+        playerRef.current.angle += Math.PI * 0.1;
+      }
+    }
+
+    if (isBoosting && !isStopped) {
       // Consume score for boost
       setScore(s => Math.max(0, s - 0.2 * dt * 60));
     }
@@ -371,21 +522,28 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     const newY = head.y + Math.sin(playerRef.current.angle) * speed * dt;
 
     if (newX < 0 || newX > worldW || newY < 0 || newY > worldH) {
-      handleDeath();
-      return;
+      if (!isInvulnerable) {
+        handleDeath();
+        return;
+      }
     }
 
     const trail = playerRef.current.segments;
-    trail.unshift({ x: newX, y: newY });
+    if (speed > 0) {
+      trail.unshift({ x: newX, y: newY });
+    }
 
-    const currentGrowth = growthWager + (playerRef.current.wager - initialWagerRef.current);
-    // Coherent growth: length grows linearly with score
+    // Growth logic: starting size (base segments from wager) + 1 segment every 7 coins collected
+    const collectedCoins = Math.max(0, playerRef.current.wager - initialWagerRef.current);
     const pointsPerSegment = 5;
-    const targetSegments = 10 + Math.floor(currentGrowth);
+    const baseSegments = initialSegCount;
+    const targetSegments = baseSegments + Math.floor(collectedCoins / 7);
     const maxTrailLen = targetSegments * pointsPerSegment;
 
-    while (trail.length > maxTrailLen) {
-      trail.pop();
+    if (speed > 0) {
+      while (trail.length > maxTrailLen) {
+        trail.pop();
+      }
     }
     playerRef.current.segments = trail;
 
@@ -393,21 +551,44 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     cameraRef.current.y += (head.y - cameraRef.current.y) * 0.1;
 
     // Dynamic zoom based on snake length to see ~80% of it
-    const targetZoom = Math.max(0.35, Math.min(1, 1200 / (maxTrailLen * 2 + 800)));
-    cameraRef.current.zoom += (targetZoom - cameraRef.current.zoom) * 0.02;
+    let targetZoomBase = Math.max(0.35, Math.min(1, 1200 / (maxTrailLen * 2 + 800)));
+    if (hasZoom) targetZoomBase *= 0.65;
+    cameraRef.current.zoom += (targetZoomBase - cameraRef.current.zoom) * 0.02;
+
+    // Update floating texts
+    setFloatingTexts(prev => prev.map(ft => ({
+      ...ft,
+      y: ft.y - 1,
+      opacity: ft.opacity - 0.02
+    })).filter(ft => ft.opacity > 0));
   };
 
-  const checkCollisions = () => {
+  const checkCollisions = (dt: number) => {
     const head = playerRef.current.segments[0];
 
     // Collision detection (Head vs Body)
     const isPlayerInvulnerable = playerRef.current.spawnTime && (Date.now() - playerRef.current.spawnTime < 1500);
 
-    // Coin collection
+    // Coin collection and attraction
     let scoreGain = 0;
     droppedCoinsRef.current.forEach(c => {
-      const d = Math.sqrt((head.x - c.x) ** 2 + (head.y - c.y) ** 2);
-      if (d < CELL) {
+      const dx = head.x - c.x;
+      const dy = head.y - c.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      
+      const attractionRadius = hasMagnet ? CELL * 3 : 0;
+      const collectionRadius = CELL;
+
+      // Magnet attraction effect
+      if (hasMagnet && d < attractionRadius && d > collectionRadius) {
+        const pullSpeed = BASE_SPEED * 2; // Moderate speed for flight effect
+        const angle = Math.atan2(dy, dx);
+        c.x += Math.cos(angle) * pullSpeed * dt;
+        c.y += Math.sin(angle) * pullSpeed * dt;
+      }
+
+      const currentD = Math.sqrt((head.x - c.x) ** 2 + (head.y - c.y) ** 2);
+      if (currentD < collectionRadius) {
         scoreGain += c.value;
         playerRef.current.wager += c.value;
         soundManager.play('goldFood');
@@ -420,6 +601,30 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     if (scoreGain > 0) {
       setScore(s => s + scoreGain);
     }
+
+    // Player Arena Item collision
+    Object.entries(itemsRef.current).forEach(([id, item]: [string, ArenaItemEntity]) => {
+      const d = Math.sqrt((head.x - item.x) ** 2 + (head.y - item.y) ** 2);
+      if (d < CELL * 1.5) {
+        const itemDef = ARENA_ITEMS.find(i => i.id === item.itemId);
+        if (itemDef) {
+          soundManager.play('plim');
+          // Update local inventory (optimistic)
+          if (!user.inventoryItems) user.inventoryItems = {};
+          user.inventoryItems[itemDef.id] = (user.inventoryItems[itemDef.id] || 0) + 1;
+          
+          // Update Firestore inventory
+          const userRef = doc(db, 'users', user.id);
+          updateDoc(userRef, {
+            [`inventoryItems.${itemDef.id}`]: increment(1)
+          }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+
+          // Delete item from arena
+          delete itemsRef.current[id];
+          deleteDoc(doc(db, 'arenaItems', id)).catch(() => {});
+        }
+      }
+    });
 
     // Player vs Player collision
     (Object.values(otherPlayersRef.current) as PlayerSession[]).forEach(other => {
@@ -612,17 +817,17 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
   const dropWagerCoins = (wagerVal: number, segments: {x: number, y: number}[]) => {
     if (!serverId || segments.length === 0) return;
     
-    // We drop one coin per segment to reflect the exact length and position
-    // The total wager value is distributed among the segments
+    // We drop the total wager value distributed among grouped segments (performance optimization)
     const totalValue = Math.floor(wagerVal);
-    const valuePerSegment = Math.max(1, Math.floor(totalValue / segments.length));
     const expiresAt = Date.now() + 4 * 60 * 1000; // 4 minutes
 
-    // To avoid too many Firestore writes, we'll drop coins every 2 segments
-    // but keep the visual length by making them slightly larger if needed
-    for (let i = 0; i < segments.length; i += 2) {
+    // Grouping: drop every 3 segments for better visual spread
+    const dropFrequency = 3;
+    const valuePerDrop = Math.max(1, Math.floor(totalValue / (segments.length / dropFrequency)));
+
+    for (let i = 0; i < segments.length; i += dropFrequency) {
       const seg = segments[i];
-      const val = valuePerSegment * 2;
+      const val = valuePerDrop;
       
       if (val > 0) {
         addDoc(collection(db, 'wagerCoins'), {
@@ -714,23 +919,73 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     ctx.strokeRect(0, 0, worldW, worldH);
     ctx.shadowBlur = 0;
 
-    // Dropped Coins (Neon Blue Points)
+    // Dropped Coins (Neon Blue Points with pulse)
+    const coinPulse = Math.sin(Date.now() / 400) * 3;
+    ctx.save();
+    
+    // Draw all outer glows first for better additive effect
+    ctx.globalCompositeOperation = 'lighter';
     droppedCoinsRef.current.forEach(c => {
-      ctx.save();
-      ctx.fillStyle = '#00f2ff';
-      ctx.shadowBlur = 15;
+      ctx.shadowBlur = 15 + coinPulse;
       ctx.shadowColor = '#00f2ff';
-      
+      ctx.fillStyle = 'rgba(0, 242, 255, 0.4)';
       ctx.beginPath();
-      ctx.arc(c.x, c.y, 6, 0, Math.PI * 2);
+      ctx.arc(c.x, c.y, 7, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // Draw all white cores
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#fff';
+    droppedCoinsRef.current.forEach(c => {
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 2.5, 0, Math.PI * 2);
       ctx.fill();
       
-      // Inner white core for extra neon effect
-      ctx.fillStyle = '#fff';
+      // Additional small neon spark
+      ctx.fillStyle = '#00f2ff';
       ctx.beginPath();
-      ctx.arc(c.x, c.y, 2, 0, Math.PI * 2);
+      ctx.arc(c.x, c.y, 1, 0, Math.PI * 2);
       ctx.fill();
-      
+    });
+    ctx.restore();
+
+    // Draw Arena Items
+    Object.values(itemsRef.current).forEach((item: ArenaItemEntity) => {
+      const itemDef = ARENA_ITEMS.find(i => i.id === item.itemId);
+      if (!itemDef) return;
+
+      ctx.save();
+      ctx.translate(item.x, item.y);
+
+      // Draw semi-transparent box
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.lineWidth = 1;
+      const boxSize = 34;
+      ctx.beginPath();
+      if (ctx.roundRect) {
+        ctx.roundRect(-boxSize / 2, -boxSize / 2, boxSize, boxSize, 8);
+      } else {
+        ctx.rect(-boxSize / 2, -boxSize / 2, boxSize, boxSize);
+      }
+      ctx.fill();
+      ctx.stroke();
+
+      if (itemDef.type === 'color') {
+        ctx.fillStyle = itemDef.value;
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = itemDef.value;
+        ctx.beginPath();
+        ctx.arc(0, 0, 10, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.font = '22px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(itemDef.value, 0, 0);
+      }
       ctx.restore();
     });
 
@@ -803,6 +1058,10 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
         gradient.addColorStop(0, 'rgba(0, 255, 255, 0.5)');
         gradient.addColorStop(0.5, 'rgba(150, 230, 255, 0.3)');
         gradient.addColorStop(1, 'rgba(200, 250, 255, 0)');
+      } else if (snake.auraType === 'lightning') {
+        gradient.addColorStop(0, 'rgba(255, 255, 0, 0.5)');
+        gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.3)');
+        gradient.addColorStop(1, 'rgba(255, 255, 200, 0)');
       }
       
       ctx.fillStyle = gradient;
@@ -810,8 +1069,28 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       ctx.arc(trail[0].x, trail[0].y, auraRadius, 0, Math.PI * 2);
       ctx.fill();
       
-      // Particles
-      if (Math.random() > 0.6) {
+      // Particles / Bolts
+      if (snake.auraType === 'lightning') {
+        for (let b = 0; b < 3; b++) {
+          if (Math.random() > 0.4) {
+            ctx.strokeStyle = 'white';
+            ctx.lineWidth = 1.5;
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = 'yellow';
+            ctx.beginPath();
+            let bx = trail[0].x;
+            let by = trail[0].y;
+            ctx.moveTo(bx, by);
+            for (let s = 0; s < 3; s++) {
+              bx += (Math.random() - 0.5) * auraRadius * 0.8;
+              by += (Math.random() - 0.5) * auraRadius * 0.8;
+              ctx.lineTo(bx, by);
+            }
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+          }
+        }
+      } else if (Math.random() > 0.6) {
         if (snake.auraType === 'fire') {
           ctx.fillStyle = `rgba(255, ${Math.floor(Math.random() * 100 + 50)}, 0, 0.5)`;
         } else if (snake.auraType === 'ice') {
@@ -1005,6 +1284,67 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
       />
+
+      {/* Ability Buttons Section */}
+      <div className="absolute bottom-6 left-4 z-[70] flex flex-col gap-3 pointer-events-auto">
+        {hasTeleport && (
+          <div className="relative">
+            <button
+              onClick={handleTeleport}
+              disabled={Date.now() - lastTeleportTime < 180000 || user.coins < 250}
+              className={`flex h-12 w-12 items-center justify-center rounded-2xl border-2 transition-all active:scale-95 ${Date.now() - lastTeleportTime < 180000 ? 'border-gray-700 bg-gray-800/80 grayscale text-gray-500' : 'border-blue-500 bg-blue-500/20 text-blue-400 shadow-lg shadow-blue-500/20 hover:bg-blue-500/30'}`}
+            >
+              <Zap size={24} />
+              {Date.now() - lastTeleportTime < 180000 && (
+                <div className="absolute -top-2 -right-2 rounded-full bg-red-500 px-1.5 py-0.5 text-[8px] font-black text-white">
+                  {Math.ceil((180000 - (Date.now() - lastTeleportTime)) / 1000)}s
+                </div>
+              )}
+            </button>
+            <span className="mt-1 block text-center text-[8px] font-black uppercase text-white/50">Teleport (250)</span>
+          </div>
+        )}
+
+        {hasStop && (
+          <div className="relative">
+            <button
+              onClick={() => setIsStopped(!isStopped)}
+              className={`flex h-12 w-12 items-center justify-center rounded-2xl border-2 transition-all active:scale-95 ${isStopped ? 'border-red-500 bg-red-500 text-white shadow-lg shadow-red-500/40' : 'border-gray-700 bg-gray-800/80 text-gray-400 hover:border-gray-500'}`}
+            >
+              <div className="h-4 w-4 bg-current rounded-sm" />
+            </button>
+            <span className="mt-1 block text-center text-[8px] font-black uppercase text-white/50">Parar</span>
+          </div>
+        )}
+
+        {hasAutopilot && (
+          <div className="relative">
+            <button
+              onClick={() => setIsAutopilot(!isAutopilot)}
+              className={`flex h-12 w-12 items-center justify-center rounded-2xl border-2 transition-all active:scale-95 ${isAutopilot ? 'border-green-500 bg-green-500/20 text-green-400 shadow-lg shadow-green-500/20' : 'border-gray-700 bg-gray-800/80 text-gray-400 hover:border-gray-500'}`}
+            >
+              <ShieldCheck size={24} />
+            </button>
+            <span className="mt-1 block text-center text-[8px] font-black uppercase text-white/50">Auto</span>
+          </div>
+        )}
+      </div>
+
+      {/* Floating Texts */}
+      <div className="pointer-events-none fixed inset-0 z-[100]">
+        {floatingTexts.map(ft => (
+          <motion.div
+            key={ft.id}
+            initial={{ opacity: 1, y: ft.y }}
+            animate={{ opacity: 0, y: ft.y - 100 }}
+            className="absolute font-black text-xs uppercase tracking-widest whitespace-nowrap"
+            style={{ left: ft.x, color: ft.color }}
+          >
+            {ft.text}
+          </motion.div>
+        ))}
+      </div>
+
       <AnimatePresence>
         {!isAlive && !isCollecting && !isWinner && (
           <motion.div

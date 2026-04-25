@@ -6,10 +6,6 @@ export const BASE_SPEED = 130;
 export const CELL = 24;
 export const SEGMENT_DISTANCE = 5; // Distance between segments for better fluidity and separation
 
-export const POWERUP_DURATION = 10000; // 10 seconds
-export const POWERUP_SPAWN_CHANCE = 0.15; // 15% chance
-export const MAGNET_RANGE = 200; // Magnet pull range
-
 export const ALL_SKINS: Skin[] = [
   { id: 'default', name: 'Default', icon: '🟢', rarity: 'common', colors: ['#22ff44', '#11cc33'] },
   { id: 'ocean', name: 'Azul', icon: '🔵', rarity: 'common', colors: ['#2288ff', '#1166cc'] },
@@ -37,16 +33,17 @@ export const ALL_SKINS: Skin[] = [
   { id: 'emoji_scared', name: 'Terror Puro', icon: '😱', rarity: 'legendary', colors: ['#93c5fd', '#3b82f6'] },
   { id: 'emoji_cool', name: 'Estilo Pro', icon: '😎', rarity: 'legendary', colors: ['#60a5fa', '#2563eb'] },
   { id: 'emoji_clown', name: 'Bromista', icon: '🤡', rarity: 'legendary', colors: ['#ffffff', '#ef4444'] },
-  { id: 'pig', name: 'Cerdito', icon: '🐷', rarity: 'common', colors: ['#ffafbd', '#ffc3a0'], price: 25, currency: 'monedas' },
-  { id: 'bald_woman', name: 'Perrito', icon: '🐶', rarity: 'common', colors: ['#f3e5ab', '#e6be8a'], price: 25, currency: 'monedas' },
-  { id: 'bald_man', name: 'Gatito', icon: '🐱', rarity: 'common', colors: ['#d2b48c', '#8b4513'], price: 25, currency: 'monedas' },
-  { id: 'radioactive', name: 'Radiactivo', icon: '☢️', rarity: 'common', colors: ['#ffff00', '#000000'], price: 25, currency: 'monedas' },
-  { id: 'biohazard', name: 'Peligro Biológico', icon: '☣️', rarity: 'common', colors: ['#ff6600', '#000000'], price: 25, currency: 'monedas' },
-  { id: 'coin_skin', name: 'Moneda de Oro', icon: '🪙', rarity: 'common', colors: ['#ffd700', '#daa520'], price: 50, currency: 'monedas' },
-  { id: 'soccer_skin', name: 'Futbolista', icon: '⚽', rarity: 'common', colors: ['#ffffff', '#000000'], price: 50, currency: 'monedas' },
-  { id: 'moon_skin', name: 'Luna Llena', icon: '🌝', rarity: 'common', colors: ['#fdfd96', '#f4f4f4'], price: 50, currency: 'monedas' },
-  { id: 'sun_skin', name: 'Sol Radiante', icon: '🌞', rarity: 'common', colors: ['#ffcc33', '#ff9900'], price: 50, currency: 'monedas' },
-  { id: 'earth_skin', name: 'Planeta Tierra', icon: '🌍', rarity: 'common', colors: ['#4b9cd3', '#228b22'], price: 50, currency: 'monedas' },
-  { id: 'phoenix', name: 'Fénix Eterno', icon: '🔥', rarity: 'legendary', colors: ['#ff0000', '#ffcc00'], price: 250, currency: 'monedas', hasAura: true, auraType: 'fire' },
-  { id: 'glacier', name: 'Glaciar Eterno', icon: '❄️', rarity: 'legendary', colors: ['#00ffff', '#ffffff'], price: 250, currency: 'monedas', hasAura: true, auraType: 'ice' },
+  { id: 'pig', name: 'Cerdito', icon: '🐷', rarity: 'common', colors: ['#ffafbd', '#ffc3a0'], price: 100, currency: 'monedas' },
+  { id: 'bald_woman', name: 'Perrito', icon: '🐶', rarity: 'common', colors: ['#f3e5ab', '#e6be8a'], price: 100, currency: 'monedas' },
+  { id: 'bald_man', name: 'Gatito', icon: '🐱', rarity: 'common', colors: ['#d2b48c', '#8b4513'], price: 100, currency: 'monedas' },
+  { id: 'radioactive', name: 'Radiactivo', icon: '☢️', rarity: 'common', colors: ['#ffff00', '#000000'], price: 100, currency: 'monedas' },
+  { id: 'biohazard', name: 'Peligro Biológico', icon: '☣️', rarity: 'common', colors: ['#ff6600', '#000000'], price: 100, currency: 'monedas' },
+  { id: 'coin_skin', name: 'Moneda de Oro', icon: '🪙', rarity: 'common', colors: ['#ffd700', '#daa520'], price: 500, currency: 'monedas' },
+  { id: 'soccer_skin', name: 'Futbolista', icon: '⚽', rarity: 'common', colors: ['#ffffff', '#000000'], price: 500, currency: 'monedas' },
+  { id: 'moon_skin', name: 'Luna Llena', icon: '🌝', rarity: 'common', colors: ['#fdfd96', '#f4f4f4'], price: 500, currency: 'monedas' },
+  { id: 'sun_skin', name: 'Sol Radiante', icon: '🌞', rarity: 'common', colors: ['#ffcc33', '#ff9900'], price: 500, currency: 'monedas' },
+  { id: 'earth_skin', name: 'Planeta Tierra', icon: '🌍', rarity: 'common', colors: ['#4b9cd3', '#228b22'], price: 500, currency: 'monedas' },
+  { id: 'phoenix', name: 'Fénix Eterno', icon: '🔥', rarity: 'legendary', colors: ['#ff0000', '#ffcc00'], price: 1000, currency: 'monedas', hasAura: true, auraType: 'fire' },
+  { id: 'glacier', name: 'Glaciar Eterno', icon: '❄️', rarity: 'legendary', colors: ['#00ffff', '#ffffff'], price: 1000, currency: 'monedas', hasAura: true, auraType: 'ice' },
+  { id: 'lightning', name: 'Rayo Eterno', icon: '⚡', rarity: 'legendary', colors: ['#ffff00', '#ffffff'], price: 1000, currency: 'monedas', hasAura: true, auraType: 'lightning' },
 ];

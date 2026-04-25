@@ -87,7 +87,7 @@ service cloud.firestore {
 
     function isValidUser(data) {
       let requiredFields = ['displayName', 'coins', 'lastActive'];
-      let optionalFields = ['id', 'email', 'ownedSkins', 'equippedSkin', 'highScore', 'highScoreMonedas', 'monedas', 'role', 'proAccessUntil', 'millonarioAccessUntil', 'usernameSet', 'botKills', 'insomniaCount'];
+      let optionalFields = ['id', 'email', 'ownedSkins', 'equippedSkin', 'highScore', 'highScoreMonedas', 'monedas', 'role', 'proAccessUntil', 'millonarioAccessUntil', 'usernameSet', 'botKills', 'insomniaCount', 'notifiedMedals', 'inventoryItems', 'inventoryAbilities', 'equippedAbilities'];
       return data.keys().hasAll(requiredFields) &&
              data.keys().hasOnly(requiredFields.concat(optionalFields)) &&
              data.displayName is string &&
@@ -106,7 +106,11 @@ service cloud.firestore {
              (!('millonarioAccessUntil' in data) || data.millonarioAccessUntil is number) &&
              (!('usernameSet' in data) || data.usernameSet is bool) &&
              (!('botKills' in data) || data.botKills is number) &&
-             (!('insomniaCount' in data) || data.insomniaCount is number);
+             (!('insomniaCount' in data) || data.insomniaCount is number) &&
+             (!('notifiedMedals' in data) || data.notifiedMedals is list) &&
+             (!('inventoryItems' in data) || data.inventoryItems is map) &&
+             (!('inventoryAbilities' in data) || data.inventoryAbilities is map) &&
+             (!('equippedAbilities' in data) || data.equippedAbilities is list);
     }
 
     function isValidTicketPurchase(data) {
@@ -181,6 +185,17 @@ service cloud.firestore {
              data.status in ['open', 'closed'];
     }
 
+    function isValidSkinListing(data) {
+      return data.keys().hasAll(['sellerId', 'sellerName', 'skinId', 'price', 'timestamp', 'status']) &&
+             data.sellerId is string &&
+             data.sellerName is string &&
+             data.skinId is string &&
+             data.price is number &&
+             data.price > 0 &&
+             data.timestamp is number &&
+             data.status in ['active', 'sold'];
+    }
+
     function isValidCompetitionStats(data) {
       return data is map;
     }
@@ -221,6 +236,14 @@ service cloud.firestore {
              data.timestamp is timestamp;
     }
 
+    function isValidArenaItem(data) {
+      return data.keys().hasAll(['x', 'y', 'itemId', 'serverId']) &&
+             data.x is number &&
+             data.y is number &&
+             data.itemId is string &&
+             data.serverId is string;
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -240,9 +263,16 @@ service cloud.firestore {
     }
 
     match /arenaFood/{foodId} {
-      allow read: if isAuthenticated();
+      allow get, list: if isAuthenticated();
       allow create: if isAuthenticated() && isValidFood(request.resource.data);
       allow update: if isAuthenticated() && isValidFood(request.resource.data);
+      allow delete: if isAuthenticated();
+    }
+
+    match /arenaItems/{itemId} {
+      allow get, list: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidArenaItem(request.resource.data);
+      allow update: if isAuthenticated() && isValidArenaItem(request.resource.data);
       allow delete: if isAuthenticated();
     }
 
@@ -288,6 +318,27 @@ service cloud.firestore {
       allow create: if isAuthenticated() && isValidPrivateRoom(request.resource.data) && request.resource.data.creatorId == request.auth.uid;
       allow update: if isAuthenticated() && isValidPrivateRoom(request.resource.data) && (resource.data.creatorId == request.auth.uid || isAdmin());
       allow delete: if isAuthenticated();
+    }
+
+    match /skinSales/{listingId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && 
+                      isValidSkinListing(request.resource.data) && 
+                      request.resource.data.sellerId == request.auth.uid &&
+                      request.resource.data.status == 'active';
+      allow update: if isAuthenticated() && (
+        // Seller can update their own active listing (e.g., price change)
+        (isOwner(resource.data.sellerId) && 
+         isValidSkinListing(request.resource.data) && 
+         resource.data.status == 'active' &&
+         request.resource.data.sellerId == resource.data.sellerId) ||
+        // Buyer can set status to 'sold'
+        (resource.data.status == 'active' && 
+         request.resource.data.status == 'sold' &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])) ||
+        isAdmin()
+      );
+      allow delete: if isAdmin() || (isAuthenticated() && resource.data.sellerId == request.auth.uid && resource.data.status == 'active');
     }
 
     match /friendships/{friendshipId} {

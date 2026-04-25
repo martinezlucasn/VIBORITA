@@ -1,18 +1,28 @@
 import { useState, useEffect, useRef } from 'react';
-import { User, Skin, Friendship, Notification as GameNotification } from '../types';
+import { User, Skin, Friendship, Notification as GameNotification, SkinListing, Ability } from '../types';
 import { ALL_SKINS } from '../constants';
+import { ALL_ABILITIES } from '../abilities';
 import { motion, AnimatePresence } from 'motion/react';
 import { supabase } from '../lib/supabase';
-import { Coins, Play, ShoppingBag, User as UserIcon, Trophy, ArrowLeft, Plus, Copy, ExternalLink, Check, X, Zap, Users, ShieldCheck, History, LogOut, Trash2, CreditCard, UserPlus, Search, Send, MessageSquare, Heart, Loader2, Award, Moon, Target, Skull, Sparkles } from 'lucide-react';
+import { Coins, Play, ShoppingBag, User as UserIcon, Trophy, ArrowLeft, Plus, Copy, ExternalLink, Check, X, Zap, Users, ShieldCheck, History, LogOut, Trash2, CreditCard, UserPlus, Search, Send, MessageSquare, Heart, Loader2, Award, Moon, Target, Skull, Sparkles, Settings, Volume2, VolumeX, Gamepad2, UserMinus } from 'lucide-react';
 import { GoldPointIcon, MonedasIcon } from './Icons';
 import AdminPanel from './AdminPanel';
-import { doc, updateDoc, onSnapshot, collection, query, where, orderBy, limit, getDocs, setDoc, addDoc, deleteDoc, getDoc, arrayUnion, increment } from 'firebase/firestore';
+import { ARENA_ITEMS, SUCCESS_RATES, ArenaItem } from '../items';
+import { doc, updateDoc, onSnapshot, collection, query, where, orderBy, limit, getDocs, setDoc, addDoc, deleteDoc, getDoc, arrayUnion, increment, runTransaction } from 'firebase/firestore';
 import { db, handleFirestoreError, auth, OperationType } from '../firebase';
 import { signOut, deleteUser } from 'firebase/auth';
+import { soundManager } from '../lib/sounds';
 import { GoogleGenAI } from "@google/genai";
 
 // Initialize AI
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+const RARITY_ORDER: Record<string, number> = {
+  legendary: 4,
+  epic: 3,
+  rare: 2,
+  common: 1
+};
 
 interface MenuProps {
   user: User;
@@ -22,14 +32,14 @@ interface MenuProps {
 }
 
 export default function Menu({ user, onStartGame, onStartTraining, onStartWager }: MenuProps) {
-  const [view, setView] = useState<'main' | 'shop' | 'inventory' | 'ranking' | 'profile' | 'wallet'>('main');
+  const [view, setView] = useState<'main' | 'shop' | 'inventory' | 'ranking' | 'profile' | 'wallet' | 'fusion'>('main');
   const [showAdmin, setShowAdmin] = useState(false);
   const [wager, setWager] = useState(0);
   const [showWagerModal, setShowWagerModal] = useState(false);
   const [showPrivateModal, setShowPrivateModal] = useState(false);
   const [showCreateConfirm, setShowCreateConfirm] = useState<{code: string, wager: number} | null>(null);
   const [privateRoomId, setPrivateRoomId] = useState('');
-  const [privateWager, setPrivateWager] = useState(10);
+  const [privateWager, setPrivateWager] = useState(50);
   const [roomError, setRoomError] = useState<string | null>(null);
   const [showJoinConfirm, setShowJoinConfirm] = useState<{id: string, wager: number} | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<'basica' | 'pro' | 'millonario'>('basica');
@@ -54,12 +64,26 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
   const [showUsernameModal, setShowUsernameModal] = useState(false);
   const [tempUsername, setTempUsername] = useState(user.displayName);
   const [isCheckingUsername, setIsCheckingUsername] = useState(false);
-  const [duelWager, setDuelWager] = useState(10);
+  const [duelWager, setDuelWager] = useState(50);
   const [selectedMedal, setSelectedMedal] = useState<any>(null);
   const [unlockedMedalIds, setUnlockedMedalIds] = useState<string[]>([]);
   const [medalNotification, setMedalNotification] = useState<any>(null);
   const [geminiMessage, setGeminiMessage] = useState<string | null>(null);
   const [isGeminiLoading, setIsGeminiLoading] = useState(false);
+  const [purchaseConfirmation, setPurchaseConfirmation] = useState<{ skin: Skin; price: number } | null>(null);
+  const [showArenaTicketsModal, setShowArenaTicketsModal] = useState(false);
+
+  // Fusion state
+  const [isFusing, setIsFusing] = useState(false);
+  const [fusingItem, setFusingItem] = useState<ArenaItem | null>(null);
+  const [fusionResult, setFusionResult] = useState<{ success: boolean; skin?: Skin; ability?: Ability } | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [musicEnabled, setMusicEnabled] = useState(soundManager.isMusicEnabled());
+  const [sfxEnabled, setSfxEnabled] = useState(soundManager.isSFXEnabled());
+  const [showControls, setShowControls] = useState(false);
+  const [highQuality, setHighQuality] = useState(true);
+  const [musicVolume, setMusicVolume] = useState(soundManager.getMusicVolume());
+  const [showTrainingModal, setShowTrainingModal] = useState(false);
 
   useEffect(() => {
     const acceptedFriends = friendships.filter(f => f.status === 'accepted').length;
@@ -80,11 +104,11 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
       { id: 'm_s', name: 'Dinero de Plata', unlocked: money >= 10000 },
       { id: 'm_g', name: 'Dinero de Oro', unlocked: money >= 500000 },
       { id: 'e_b', name: 'Eliminador de Bronce', unlocked: botKills >= 10 },
-      { id: 'e_s', name: 'Eliminador de Plata', unlocked: botKills >= 1000 },
-      { id: 'e_g', name: 'Eliminador de Oro', unlocked: botKills >= 10000 },
+      { id: 'e_s', name: 'Eliminador de Plata', unlocked: botKills >= 100 },
+      { id: 'e_g', name: 'Eliminador de Oro', unlocked: botKills >= 1000 },
       { id: 'i_b', name: 'Insomnio de Bronce', unlocked: insomnia >= 1 },
-      { id: 'i_s', name: 'Insomnio de Plata', unlocked: insomnia >= 100 },
-      { id: 'i_g', name: 'Insomnio de Oro', unlocked: insomnia >= 1000 },
+      { id: 'i_s', name: 'Insomnio de Plata', unlocked: insomnia >= 30 },
+      { id: 'i_g', name: 'Insomnio de Oro', unlocked: insomnia >= 365 },
     ];
 
     const newlyUnlocked = currentMedals.filter(m => m.unlocked && !unlockedMedalIds.includes(m.id));
@@ -124,6 +148,51 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
     }
   }, [user.usernameSet]);
 
+  useEffect(() => {
+    // Attempt to initialize music on mount
+    soundManager.initMusic();
+
+    // Browser policy: Auto-unlock music on first interaction
+    const handleFirstInteraction = () => {
+      soundManager.initMusic();
+      document.removeEventListener('mousedown', handleFirstInteraction);
+      document.removeEventListener('touchstart', handleFirstInteraction);
+      document.removeEventListener('keydown', handleFirstInteraction);
+    };
+
+    document.addEventListener('mousedown', handleFirstInteraction);
+    document.addEventListener('touchstart', handleFirstInteraction);
+    document.addEventListener('keydown', handleFirstInteraction);
+
+    return () => {
+      document.removeEventListener('mousedown', handleFirstInteraction);
+      document.removeEventListener('touchstart', handleFirstInteraction);
+      document.removeEventListener('keydown', handleFirstInteraction);
+    };
+  }, []);
+
+  // Gift fragments for tester
+  useEffect(() => {
+    if (user.email === 'martinezlucasn@gmail.com' && !sessionStorage.getItem('gift_fragments_v4')) {
+      const grantFragments = async () => {
+        try {
+          const userRef = doc(db, 'users', user.id);
+          const updates: any = {};
+          ALL_ABILITIES.forEach(ability => {
+            updates[`inventoryItems.${ability.fragmentId}`] = increment(4);
+          });
+          await updateDoc(userRef, updates);
+          sessionStorage.setItem('gift_fragments_v4', 'true');
+          setProfileMessage({ text: '¡4 fragmentos adicionales acreditados para pruebas!', type: 'success' });
+          setTimeout(() => setProfileMessage(null), 5000);
+        } catch (e) {
+          console.error("Error gifting fragments:", e);
+        }
+      };
+      grantFragments();
+    }
+  }, [user.id, user.email]);
+
   // Profile States
   const [newUsername, setNewUsername] = useState(user.displayName);
   const [withdrawAmount, setWithdrawAmount] = useState(0);
@@ -133,6 +202,8 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
   const [withdrawalHistory, setWithdrawalHistory] = useState<any[]>([]);
   const [currentTime, setCurrentTime] = useState(Date.now());
   const [profileTab, setProfileTab] = useState<'general' | 'friends'>('general');
+  const [inventoryTab, setInventoryTab] = useState<'skins' | 'abilities'>('skins');
+  const [friendToDelete, setFriendToDelete] = useState<{id: string, name: string} | null>(null);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -467,6 +538,52 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
     setTimeout(() => setProfileMessage(null), 3000);
   };
 
+  const handleWithdrawListing = async (listing: SkinListing) => {
+    try {
+      const userRef = doc(db, 'users', user.id);
+      const listingRef = doc(db, 'skinSales', listing.id);
+
+      await runTransaction(db, async (transaction) => {
+        const userDoc = await transaction.get(userRef);
+        if (!userDoc.exists()) throw new Error("Usuario no encontrado");
+        
+        const listingDoc = await transaction.get(listingRef);
+        if (!listingDoc.exists()) throw new Error("Publicación no encontrada");
+        if (listingDoc.data().status !== 'active') throw new Error("La publicación ya no está activa");
+
+        transaction.update(userRef, {
+          ownedSkins: arrayUnion(listing.skinId)
+        });
+        transaction.delete(listingRef);
+      });
+
+      setProfileMessage({ text: 'Skin retirada y devuelta al inventario', type: 'success' });
+    } catch (e) {
+      console.error("Error withdrawing listing:", e);
+      setProfileMessage({ text: 'Error al retirar la skin', type: 'error' });
+    }
+    setTimeout(() => setProfileMessage(null), 3000);
+  };
+
+  const handleClaimMedalReward = async (medalId: string) => {
+    if (medalId !== 'f_p') return;
+    if (user.claimedPlatinumReward) return;
+
+    try {
+      const userRef = doc(db, 'users', user.id);
+      await updateDoc(userRef, {
+        ownedSkins: arrayUnion('lightning'),
+        claimedPlatinumReward: true
+      });
+      setProfileMessage({ text: '¡Felicidades! Has reclamado el Rayo Eterno ⚡', type: 'success' });
+      setSelectedMedal(prev => prev ? { ...prev, claimed: true } : null);
+    } catch (e) {
+      console.error("Error claiming reward:", e);
+      setProfileMessage({ text: 'Error al reclamar la skin', type: 'error' });
+    }
+    setTimeout(() => setProfileMessage(null), 3000);
+  };
+
   const handleInviteFriend = async (friendId: string, wager: number) => {
     if (user.monedas < wager) {
       setProfileMessage({ text: 'No tienes suficientes monedas', type: 'error' });
@@ -587,6 +704,184 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
     setTimeout(() => setProfileMessage(null), 3000);
   };
 
+  const [showListModal, setShowListModal] = useState<{ skin: Skin } | null>(null);
+  const [listPrice, setListPrice] = useState(10);
+  const [isListing, setIsListing] = useState(false);
+  const [listings, setListings] = useState<SkinListing[]>([]);
+
+  useEffect(() => {
+    const q = query(collection(db, 'skinSales'), where('status', '==', 'active'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const list: SkinListing[] = [];
+      snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() } as SkinListing));
+      setListings(list);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleSellToSystem = async (skin: Skin) => {
+    if (skin.id === 'default') {
+      setProfileMessage({ text: 'No puedes vender el skin base', type: 'error' });
+      return;
+    }
+    const rawPrice = skin.price || (skin.rarity === 'legendary' ? 15000 : skin.rarity === 'epic' ? 10000 : skin.rarity === 'rare' ? 5000 : 2000);
+    const currency = skin.currency || 'coins';
+    
+    // Calculate point sell price: coin-skins sell for 20x their coin value * 0.5 (more valuable than point skins)
+    // Point-skins sell for rawPrice * 0.5
+    const sellPrice = currency === 'monedas' 
+      ? Math.floor(rawPrice * 20 * 0.5) 
+      : Math.floor(rawPrice * 0.5);
+
+    const skinIndex = user.ownedSkins.indexOf(skin.id);
+    if (skinIndex === -1) return;
+
+    const newOwnedSkins = [...user.ownedSkins];
+    newOwnedSkins.splice(skinIndex, 1);
+
+    const userRef = doc(db, 'users', user.id);
+    await updateDoc(userRef, {
+      ownedSkins: newOwnedSkins,
+      coins: increment(sellPrice)
+    });
+
+    // Supabase sync
+    await supabase.from('profiles').update({
+      coins: user.coins + sellPrice
+    }).eq('id', user.id);
+
+    await supabase.from('transactions').insert({
+      user_id: user.id,
+      type: 'earned',
+      currency: 'coins',
+      amount: sellPrice,
+      reason: `system_resale: ${skin.name}`,
+      timestamp: new Date().toISOString()
+    });
+
+    setProfileMessage({ text: `¡Skin vendida! Recibiste +${sellPrice.toLocaleString()} Puntos`, type: 'success' });
+    setTimeout(() => setProfileMessage(null), 3000);
+  };
+
+  const handleDeleteFriendship = async () => {
+    if (!friendToDelete) return;
+    try {
+      await deleteDoc(doc(db, 'friendships', friendToDelete.id));
+      setProfileMessage({ text: 'Amigo eliminado correctamente', type: 'success' });
+      setSelectedFriend(null);
+      setTimeout(() => setProfileMessage(null), 3000);
+    } catch (error) {
+      console.error('Error deleting friendship:', error);
+      setProfileMessage({ text: 'Error al eliminar amigo', type: 'error' });
+      setTimeout(() => setProfileMessage(null), 3000);
+    } finally {
+      setFriendToDelete(null);
+    }
+  };
+
+  const handleListSkin = async (skin: Skin, price: number) => {
+    if (price <= 0 || isListing) return;
+    const skinIndex = user.ownedSkins.indexOf(skin.id);
+    if (skinIndex === -1) return;
+
+    setIsListing(true);
+
+    try {
+      const newOwnedSkins = [...user.ownedSkins];
+      newOwnedSkins.splice(skinIndex, 1);
+
+      const userRef = doc(db, 'users', user.id);
+      await updateDoc(userRef, {
+        ownedSkins: newOwnedSkins
+      });
+
+      await addDoc(collection(db, 'skinSales'), {
+        sellerId: user.id,
+        sellerName: user.displayName,
+        skinId: skin.id,
+        price: price,
+        timestamp: Date.now(),
+        status: 'active'
+      });
+
+      // Wait for 3 seconds before closing and showing success
+      setTimeout(() => {
+        setIsListing(false);
+        setShowListModal(null);
+        setView('profile');
+        setProfileTab('friends');
+        setProfileMessage({ text: 'Skin publicada para tus amigos', type: 'success' });
+        setTimeout(() => setProfileMessage(null), 3000);
+      }, 3000);
+    } catch (e) {
+      console.error('Error listing skin:', e);
+      setProfileMessage({ text: 'Error al publicar skin', type: 'error' });
+      setIsListing(false);
+      setTimeout(() => setProfileMessage(null), 3000);
+    }
+  };
+
+  const handleBuyFromFriend = async (listing: SkinListing) => {
+    if (user.monedas < listing.price) {
+      setProfileMessage({ text: 'Monedas insuficientes', type: 'error' });
+      setTimeout(() => setProfileMessage(null), 3000);
+      return;
+    }
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const listingDoc = await transaction.get(doc(db, 'skinSales', listing.id));
+        if (!listingDoc.exists() || listingDoc.data()?.status !== 'active') {
+          throw new Error('La skin ya no está disponible');
+        }
+
+        const buyerRef = doc(db, 'users', user.id);
+        const sellerRef = doc(db, 'users', listing.sellerId);
+        
+        transaction.update(buyerRef, {
+          monedas: increment(-listing.price),
+          ownedSkins: arrayUnion(listing.skinId)
+        });
+
+        transaction.update(sellerRef, {
+          monedas: increment(listing.price)
+        });
+
+        transaction.update(doc(db, 'skinSales', listing.id), {
+          status: 'sold'
+        });
+      });
+
+      // Supabase sync (only local user for simplicity, seller will sync on next login/activity)
+      await supabase.from('profiles').update({ monedas: user.monedas - listing.price }).eq('id', user.id);
+
+      await supabase.from('transactions').insert([
+        {
+          user_id: user.id,
+          type: 'spent',
+          currency: 'monedas',
+          amount: listing.price,
+          reason: `market_buy: ${listing.skinId} from ${listing.sellerName}`,
+          timestamp: new Date().toISOString()
+        },
+        {
+          user_id: listing.sellerId,
+          type: 'earned',
+          currency: 'monedas',
+          amount: listing.price,
+          reason: `market_sold: ${listing.skinId} to ${user.displayName}`,
+          timestamp: new Date().toISOString()
+        }
+      ]);
+
+      setProfileMessage({ text: 'Skin comprada con éxito!', type: 'success' });
+    } catch (e: any) {
+      console.error('Error buying skin:', e);
+      setProfileMessage({ text: e.message || 'Error al comprar skin', type: 'error' });
+    }
+    setTimeout(() => setProfileMessage(null), 3000);
+  };
+
   const equippedSkin = ALL_SKINS.find(s => s.id === user.equippedSkin) || ALL_SKINS[0];
 
   const handleCreatePreference = async (amount: number, type: 'monedas' | 'points' = 'monedas', pointsAmount: number = 0, price?: number) => {
@@ -629,6 +924,45 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
     // Sync with Supabase
     await supabase.from('profiles').update({ equipped_skin: skinId }).eq('id', user.id);
   };
+  
+  const handleEquipAbility = async (abilityId: string) => {
+    const currentEquipped = user.equippedAbilities || [];
+    const isEquipped = currentEquipped.includes(abilityId);
+    
+    let newEquipped: string[];
+    if (isEquipped) {
+      newEquipped = currentEquipped.filter(id => id !== abilityId);
+    } else {
+      newEquipped = [...currentEquipped, abilityId];
+    }
+    
+    const userRef = doc(db, 'users', user.id);
+    await updateDoc(userRef, { equippedAbilities: newEquipped })
+      .catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+  };
+
+  const handleSellAbilityToSystem = async (ability: Ability) => {
+    const count = user.inventoryAbilities?.[ability.id] || 0;
+    if (count <= 0) return;
+
+    const sellPrice = 10000;
+    const userRef = doc(db, 'users', user.id);
+    
+    try {
+      await updateDoc(userRef, {
+        [`inventoryAbilities.${ability.id}`]: increment(-1),
+        coins: increment(sellPrice)
+      });
+      
+      setProfileMessage({ text: `Habilidad vendida por ${sellPrice.toLocaleString()} Puntos`, type: 'success' });
+    } catch (e) {
+      console.error('Error selling ability:', e);
+      setProfileMessage({ text: 'Error al vender habilidad', type: 'error' });
+    }
+    setTimeout(() => setProfileMessage(null), 3000);
+  };
+
+  const [showAbilityListingModal, setShowAbilityListingModal] = useState<{ ability: Ability } | null>(null);
 
   const handleUpdateUsername = async () => {
     if (!newUsername.trim() || newUsername === user.displayName) return;
@@ -720,14 +1054,24 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
   };
 
   const handleDeleteAccount = async () => {
-    const confirmDelete = window.confirm('¿Estás seguro de que quieres desvincular tu cuenta? Esta acción eliminará todos tus datos, puntos y monedas de forma permanente.');
-    if (!confirmDelete) return;
+    const confirmation = window.prompt(`¿ESTÁS ABSOLUTAMENTE SEGURO? Esta acción es IRREVERSIBLE y perderás todos tus puntos, monedas y skins para siempre.\n\nPara confirmar, escribe tu nombre de usuario exactamente: "${user.displayName}"`);
+    
+    if (confirmation !== user.displayName) {
+      if (confirmation !== null) {
+        setProfileMessage({ text: 'El nombre no coincide. Acción cancelada.', type: 'error' });
+        setTimeout(() => setProfileMessage(null), 3000);
+      }
+      return;
+    }
 
     const currentUser = auth.currentUser;
     if (!currentUser) return;
 
     setIsUpdatingProfile(true);
     try {
+      // Set flag to avoid auto-recreation in App.tsx
+      sessionStorage.setItem('deleting_account', 'true');
+      
       // 1. Delete from Firestore
       await deleteDoc(doc(db, 'users', user.id));
       
@@ -738,12 +1082,14 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
       await deleteUser(currentUser);
       
       setProfileMessage({ text: 'Cuenta desvinculada con éxito', type: 'success' });
+      window.location.reload();
     } catch (e: any) {
       console.error('Error deleting account:', e);
+      sessionStorage.removeItem('deleting_account');
       if (e.code === 'auth/requires-recent-login') {
         setProfileMessage({ text: 'Por seguridad, debes volver a iniciar sesión antes de desvincular la cuenta', type: 'error' });
       } else {
-        setProfileMessage({ text: 'Error al desvincular la cuenta', type: 'error' });
+        setProfileMessage({ text: 'Error al desvincular la cuenta: ' + e.message, type: 'error' });
       }
     } finally {
       setIsUpdatingProfile(false);
@@ -789,7 +1135,12 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
     setShowCreateConfirm({ code: newCode, wager: wager });
   };
 
-  const handleBuy = async (skin: Skin, price: number) => {
+  const handleBuy = (skin: Skin, price: number) => {
+    setPurchaseConfirmation({ skin, price });
+  };
+
+  const executePurchase = async (skin: Skin, price: number) => {
+    setPurchaseConfirmation(null);
     const currency = skin.currency || 'coins';
     const userBalance = currency === 'coins' ? user.coins : user.monedas;
     
@@ -836,15 +1187,100 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
     await supabase.from('profiles').update(supabaseUpdate).eq('id', user.id);
   };
 
+  const handleStartFusion = async (item: ArenaItem) => {
+    const count = user.inventoryItems?.[item.id] || 0;
+    if (count < 4) {
+      setGeminiMessage('Necesitas al menos 4 elementos del mismo tipo para intentar la fusión.');
+      setIsGeminiLoading(true);
+      setTimeout(() => setIsGeminiLoading(false), 3000);
+      return;
+    }
+    if (user.coins < 1000) {
+      setGeminiMessage('Necesitas 1000 Puntos para la caja de fusión.');
+      setIsGeminiLoading(true);
+      setTimeout(() => setIsGeminiLoading(false), 3000);
+      return;
+    }
+
+    setFusingItem(item);
+    setIsFusing(true);
+    setFusionResult(null);
+    soundManager.play('star');
+
+    // Deduction
+    const userRef = doc(db, 'users', user.id);
+    await updateDoc(userRef, {
+      coins: increment(-1000),
+      [`inventoryItems.${item.id}`]: increment(-4)
+    }).catch(e => console.error("Error updating fusion cost:", e));
+
+    // 4 seconds
+    setTimeout(async () => {
+      const successRate = SUCCESS_RATES[item.rarity];
+      const success = Math.random() < successRate;
+      
+      if (success) {
+        if (item.skinId.startsWith('ability_')) {
+          const abilityId = item.skinId.replace('ability_', '');
+          const ability = ALL_ABILITIES.find(a => a.id === abilityId);
+          setFusionResult({ success: true, ability });
+        } else {
+          const skin = ALL_SKINS.find(s => s.id === item.skinId);
+          setFusionResult({ success: true, skin });
+        }
+      } else {
+        setFusionResult({ success: false });
+      }
+      setIsFusing(false);
+    }, 4000);
+  };
+
+  const handleCollectFusionReward = async () => {
+    if (!fusionResult?.success || (!fusionResult.skin && !fusionResult.ability)) return;
+    
+    console.log("Recolectando recompensa de fusión:", fusionResult.ability ? 'Habilidad' : 'Skin');
+    const userRef = doc(db, 'users', user.id);
+    try {
+      if (fusionResult.skin) {
+        await updateDoc(userRef, {
+          ownedSkins: arrayUnion(fusionResult.skin.id)
+        });
+      } else if (fusionResult.ability) {
+        const abilityPath = `inventoryAbilities.${fusionResult.ability.id}`;
+        await updateDoc(userRef, {
+          [abilityPath]: increment(1)
+        });
+      }
+      soundManager.play('star');
+      setProfileMessage({ text: '¡Recompensa recolectada con éxito!', type: 'success' });
+    } catch (e: any) {
+      console.error("Error collecting reward:", e);
+      setProfileMessage({ text: `Error al recolectar: ${e.message}`, type: 'error' });
+    } finally {
+      // Always reset state even if Firestore fails to prevent getting stuck
+      setFusionResult(null);
+      setFusingItem(null);
+      setTimeout(() => setProfileMessage(null), 3000);
+    }
+  };
+
   return (
     <div className="h-full w-full overflow-y-auto">
       <div className="flex min-h-full w-full flex-col items-center justify-center p-4 pb-20 text-white">
       {view === 'main' && (
         <div className="flex w-full max-w-md flex-col gap-4">
+          <button 
+            onClick={() => setShowSettings(true)}
+            className="absolute left-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-gray-800/80 text-gray-400 transition-all hover:bg-blue-600/20 hover:text-blue-400 border border-white/5 active:scale-95 shadow-lg backdrop-blur-sm z-50"
+            title="Ajustes"
+          >
+            <Settings size={20} />
+          </button>
+
           {user.email === 'martinezlucasn@gmail.com' && (
             <button 
               onClick={() => setShowAdmin(true)}
-              className="absolute right-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-red-600/20 text-red-500 transition-all hover:bg-red-600/40"
+              className="absolute right-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-red-600/20 text-red-500 transition-all hover:bg-red-600/40 z-50"
               title="Panel Maestro"
             >
               <ShieldCheck size={20} />
@@ -898,7 +1334,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 <div className="flex items-center gap-2">
                   <MonedasIcon size={20} />
                   <motion.span 
-                    key={user.monedas}
+                    key={`menu-monedas-${user.monedas}`}
                     initial={{ scale: 1.2, color: '#60a5fa' }}
                     animate={{ scale: 1, color: '#ffffff' }}
                     className="text-2xl font-black group-hover:text-blue-200 transition-colors"
@@ -930,23 +1366,23 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 <span className="text-[10px] font-bold text-white">{onlineCount}</span>
               </div>
               <MonedasIcon size={24} /> 
-              <span>MONEDAS</span>
+              <span>COMPETICIÓN GLOBAL</span>
             </button>
 
             <button
-              onClick={() => onStartTraining(3)}
+              onClick={() => setShowTrainingModal(true)}
               className="flex w-full items-center justify-center gap-3 rounded-2xl bg-gray-800 py-6 text-xl font-black uppercase tracking-tighter transition-all hover:bg-gray-700 active:scale-95 border border-white/5 shadow-lg"
             >
               <GoldPointIcon size={24} />
-              <span>PUNTOS BASICO</span>
+              <span>JUGAR POR PUNTOS</span>
             </button>
 
             <button
-              onClick={() => onStartTraining(100)}
-              className="flex w-full items-center justify-center gap-3 rounded-2xl bg-gray-800 py-6 text-xl font-black uppercase tracking-tighter transition-all hover:bg-gray-700 active:scale-95 border border-white/5 shadow-lg"
+              onClick={() => setView('fusion')}
+              className="flex w-full items-center justify-center gap-3 rounded-2xl bg-gradient-to-r from-purple-600/40 to-blue-600/40 py-6 text-xl font-black uppercase tracking-tighter transition-all hover:from-purple-600/60 hover:to-blue-600/60 active:scale-95 border border-purple-500/30 shadow-[0_0_20px_rgba(147,51,234,0.2)] group"
             >
-              <GoldPointIcon size={24} />
-              <span>PUNTOS AVANZADO</span>
+              <Zap size={26} className="text-yellow-400 group-hover:rotate-12 transition-transform" />
+              <span className="bg-clip-text text-transparent bg-gradient-to-r from-white via-white to-purple-200">CAJA DE FUSIÓN</span>
             </button>
 
             <button
@@ -1075,12 +1511,12 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                         { id: 'm_g', name: 'Dinero de Oro', desc: 'Llegar a 500.000 monedas', icon: <Coins size={20} />, color: '#ffd700', current: money, goal: 500000, unlocked: money >= 500000 },
                         // Eliminator
                         { id: 'e_b', name: 'Eliminador de Bronce', desc: 'Matar 10 bots', icon: <Target size={20} />, color: '#cd7f32', current: botKills, goal: 10, unlocked: botKills >= 10 },
-                        { id: 'e_s', name: 'Eliminador de Plata', desc: 'Matar 1.000 bots', icon: <Skull size={20} />, color: '#c0c0c0', current: botKills, goal: 1000, unlocked: botKills >= 1000 },
-                        { id: 'e_g', name: 'Eliminador de Oro', desc: 'Matar 10.000 bots', icon: <Trophy size={20} />, color: '#ffd700', current: botKills, goal: 10000, unlocked: botKills >= 10000 },
+                        { id: 'e_s', name: 'Eliminador de Plata', desc: 'Matar 100 bots', icon: <Skull size={20} />, color: '#c0c0c0', current: botKills, goal: 100, unlocked: botKills >= 100 },
+                        { id: 'e_g', name: 'Eliminador de Oro', desc: 'Matar 1.000 bots', icon: <Trophy size={20} />, color: '#ffd700', current: botKills, goal: 1000, unlocked: botKills >= 1000 },
                         // Insomnia
                         { id: 'i_b', name: 'Insomnio de Bronce', desc: 'Jugar 1 vez (00:00 - 05:00 AM)', icon: <Moon size={20} />, color: '#cd7f32', current: insomnia, goal: 1, unlocked: insomnia >= 1 },
-                        { id: 'i_s', name: 'Insomnio de Plata', desc: 'Jugar 100 veces (00:00 - 05:00 AM)', icon: <Moon size={20} />, color: '#c0c0c0', current: insomnia, goal: 100, unlocked: insomnia >= 100 },
-                        { id: 'i_g', name: 'Insomnio de Oro', desc: 'Jugar 1.000 veces (00:00 - 05:00 AM)', icon: <Moon size={20} />, color: '#ffd700', current: insomnia, goal: 1000, unlocked: insomnia >= 1000 },
+                        { id: 'i_s', name: 'Insomnio de Plata', desc: 'Jugar 30 días (00:00 - 05:00 AM)', icon: <Moon size={20} />, color: '#c0c0c0', current: insomnia, goal: 30, unlocked: insomnia >= 30 },
+                        { id: 'i_g', name: 'Insomnio de Oro', desc: 'Jugar 365 días (00:00 - 05:00 AM)', icon: <Moon size={20} />, color: '#ffd700', current: insomnia, goal: 365, unlocked: insomnia >= 365 },
                       ];
 
                       return medals.map((medal, idx) => (
@@ -1184,7 +1620,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       {friendships.filter(f => f.status === 'pending' && f.requesterId !== user.id).map((f, idx) => {
                         const requester = friendProfiles[f.requesterId];
                         return (
-                          <div key={`req-${f.id}-${idx}`} className="flex items-center justify-between rounded-xl bg-yellow-500/5 p-3 border border-yellow-500/20">
+                          <div key={`pending-req-${f.id}-${idx}`} className="flex items-center justify-between rounded-xl bg-yellow-500/5 p-3 border border-yellow-500/20">
                             <div className="flex items-center gap-3">
                               <div className="h-8 w-8 rounded-full bg-yellow-500/20 flex items-center justify-center text-yellow-500 font-bold">
                                 {requester?.displayName?.[0].toUpperCase() || '?'}
@@ -1228,7 +1664,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       
                       return (
                         <div 
-                          key={`friend-${f.id}-${idx}`} 
+                          key={`friend-accepted-${f.id}-${idx}`} 
                           onClick={() => friend && setSelectedFriend(friend)}
                           className="group flex items-center justify-between rounded-xl bg-white/5 p-3 border border-white/5 hover:bg-white/10 transition-all cursor-pointer"
                         >
@@ -1252,12 +1688,22 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                             <button 
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleInviteFriend(friendId, 10);
+                                handleInviteFriend(friendId, 50);
                               }}
                               className="rounded-lg bg-purple-600/20 p-2 text-purple-400 hover:bg-purple-600/40"
                               title="Invitar a Duelo"
                             >
                               <Zap size={16} />
+                            </button>
+                            <button 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setFriendToDelete({ id: f.id, name: friend?.displayName || 'Usuario' });
+                              }}
+                              className="rounded-lg bg-red-600/20 p-2 text-red-400 hover:bg-red-600/40"
+                              title="Eliminar Amigo"
+                            >
+                              <Trash2 size={16} />
                             </button>
                           </div>
                         </div>
@@ -1271,6 +1717,82 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                     )}
                   </div>
                 </div>
+
+                {/* Global Marketplace Section */}
+                <div className="space-y-3 pt-4 border-t border-white/5">
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-blue-400 flex items-center gap-2">
+                    <ShoppingBag size={14} /> Skins en Venta
+                  </h3>
+                  <div className="max-h-60 space-y-2 overflow-y-auto pr-2 custom-scrollbar">
+                    {(() => {
+                      const activeListings = listings
+                        .filter(l => l.status === 'active')
+                        .sort((a, b) => {
+                          const isOwnA = a.sellerId === user.id;
+                          const isOwnB = b.sellerId === user.id;
+                          if (isOwnA && !isOwnB) return -1;
+                          if (!isOwnA && isOwnB) return 1;
+                          return b.timestamp - a.timestamp;
+                        });
+
+                      if (activeListings.length === 0) {
+                        return (
+                          <div className="py-8 text-center bg-white/5 rounded-xl border border-dashed border-white/10">
+                            <ShoppingBag size={24} className="mx-auto text-gray-800 mb-2" />
+                            <p className="text-[10px] text-gray-600 uppercase font-bold">No hay skins publicadas</p>
+                          </div>
+                        );
+                      }
+
+                      return activeListings.map((listing, idx) => {
+                        const skin = ALL_SKINS.find(s => s.id === listing.skinId);
+                        if (!skin) return null;
+                        const isOwnListing = listing.sellerId === user.id;
+
+                        return (
+                          <div 
+                            key={`market-item-${listing.id}-${idx}`}
+                            className="flex items-center justify-between rounded-xl bg-white/5 p-3 border border-white/5 hover:border-blue-500/30 transition-all"
+                          >
+                            <div className="flex items-center gap-3">
+                              <span className="text-2xl">{skin.icon}</span>
+                              <div>
+                                <p className="text-xs font-black text-white uppercase leading-none">{skin.name}</p>
+                                <div className="flex items-center gap-1 mt-1">
+                                  <MonedasIcon size={10} />
+                                  <span className="text-xs font-black text-blue-400">{listing.price.toLocaleString()}</span>
+                                  <span className="text-[8px] font-black text-gray-500 uppercase ml-2 tracking-tighter">Vendedor: {isOwnListing ? 'Tú' : listing.sellerName}</span>
+                                </div>
+                              </div>
+                            </div>
+                            {!isOwnListing && (
+                              <button 
+                                onClick={() => handleBuyFromFriend(listing)}
+                                disabled={user.monedas < listing.price}
+                                className="rounded-lg bg-blue-600 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-white hover:bg-blue-500 disabled:opacity-50 transition-all shadow-lg shadow-blue-600/20"
+                              >
+                                Comprar
+                              </button>
+                            )}
+                            {isOwnListing && (
+                              <div className="flex flex-col gap-1 items-end">
+                                <div className="text-[8px] font-black uppercase text-yellow-500 px-2 py-1 bg-yellow-500/10 rounded-lg border border-yellow-500/20">
+                                    Tu Publicación
+                                </div>
+                                <button
+                                  onClick={() => handleWithdrawListing(listing)}
+                                  className="text-[8px] font-bold uppercase text-red-400 hover:text-red-300 transition-colors underline underline-offset-2"
+                                >
+                                  Retirar
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      });
+                    })()}
+                  </div>
+                </div>
               </div>
             )}
 
@@ -1278,7 +1800,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
           <AnimatePresence mode="popLayout">
             {profileMessage && (
               <motion.div
-                key={`profile-msg-${profileMessage.text}`}
+                key={`profile-msg-${profileMessage.type}-${profileMessage.text.substring(0, 10)}`}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 10 }}
@@ -1365,47 +1887,14 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                   >
                     Confirmar Retiro
                   </button>
-                </div>
-              </div>
-
-              {/* Points Exchange in Wallet */}
-              <div className="space-y-4 pt-4 border-t border-white/5">
-                <div className="flex items-center gap-2 text-yellow-500">
-                  <GoldPointIcon size={18} />
-                  <h3 className="text-xs font-bold uppercase tracking-widest">Canjear por Puntos</h3>
-                </div>
-                <div className="grid grid-cols-1 gap-3">
-                  {[
-                    { points: 1000, cost: 100 },
-                    { points: 2000, cost: 175 }
-                  ].map((pkg, idx) => (
-                    <button
-                      key={`exchange-pkg-${pkg.points}-${idx}`}
-                      onClick={() => handleExchangePoints(pkg.points, pkg.cost)}
-                      disabled={user.monedas < pkg.cost}
-                      className="group relative flex items-center justify-between rounded-2xl border border-white/5 bg-white/5 p-4 transition-all hover:bg-blue-600/20 hover:border-blue-500/50 disabled:opacity-30 active:scale-95"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="rounded-xl bg-yellow-500/20 p-2">
-                          <GoldPointIcon size={20} />
-                        </div>
-                        <div className="text-left">
-                          <p className="text-lg font-black text-white">{pkg.points.toLocaleString()} Puntos</p>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="flex items-center gap-2 justify-end">
-                          <span className="text-lg font-black text-blue-400">{pkg.cost}</span>
-                          <MonedasIcon size={14} />
-                        </div>
-                      </div>
-                    </button>
-                  ))}
+                  <p className="mt-2 text-center text-[10px] font-medium text-white/30 italic whitespace-nowrap">
+                    *Los depósitos serán efectuados dentro de las 48hs.
+                  </p>
                 </div>
               </div>
             </div>
 
-            {/* Right Column: Purchase Options */}
+            {/* Purchase Options */}
             <div className="space-y-4">
               <div className="flex items-center gap-2 text-blue-400">
                 <ShoppingBag size={18} />
@@ -1429,6 +1918,12 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                     </div>
                     <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">${Math.round(amount * 1.101).toLocaleString()} ARS</span>
                     
+                    {amount === 5000 && (
+                      <div className="mt-1 rounded-full bg-green-500/20 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest text-green-400 border border-green-500/30">
+                        Compra Popular
+                      </div>
+                    )}
+
                     {amount === 100000 && (
                       <div className="mt-2 rounded-full bg-yellow-500 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest text-black">
                         +50.000 Puntos Gratis
@@ -1443,12 +1938,6 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                   </button>
                 ))}
               </div>
-
-              <div className="rounded-xl bg-blue-500/10 p-4 border border-blue-500/20">
-                <p className="text-[10px] text-blue-300 leading-relaxed">
-                  * Las recargas se procesan manualmente. Selecciona un monto para ver los datos de transferencia.
-                </p>
-              </div>
             </div>
           </div>
 
@@ -1461,7 +1950,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             
             <div className="max-h-[300px] space-y-3 overflow-y-auto pr-2 custom-scrollbar">
               {withdrawalHistory.map((w, idx) => (
-                <div key={`withdraw-${w.id}-${idx}`} className="rounded-xl bg-white/5 p-4 border border-white/5 hover:bg-white/10 transition-colors">
+                <div key={`withdraw-hist-${w.id || idx}-${idx}`} className="rounded-xl bg-white/5 p-4 border border-white/5 hover:bg-white/10 transition-colors">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-[10px] font-bold text-gray-500">{new Date(w.timestamp).toLocaleDateString()}</span>
                     <span className={`rounded-full px-2 py-0.5 text-[8px] font-black uppercase tracking-widest ${w.status === 'completed' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'}`}>
@@ -1515,9 +2004,11 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             </button>
           </div>
           <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-2 custom-scrollbar">
-            {topPlayers.map((player, idx) => (
+            {topPlayers.map((player, idx) => {
+              const currentTime = Date.now();
+              return (
               <div 
-                key={`rank-${player.id}-${idx}`} 
+                key={`global-rank-row-${player.id}-${idx}-${player.coins}`} 
                 className={`flex items-center justify-between rounded-xl p-4 ${player.id === user.id ? 'bg-blue-600/20 border border-blue-500/30' : 'bg-gray-800/50'}`}
               >
                 <div className="flex items-center gap-4">
@@ -1537,9 +2028,10 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                     {player.id === user.id && <span className="text-[8px] font-bold uppercase tracking-widest text-blue-400">Tú</span>}
                   </div>
                 </div>
-                <span className="font-black text-yellow-500">{player.coins} <GoldPointIcon size={14} /></span>
+                <div className="font-black text-yellow-500 flex items-center gap-1">{player.coins} <GoldPointIcon size={14} /></div>
               </div>
-            ))}
+              )
+            })}
           </div>
           <button
             onClick={() => setView('main')}
@@ -1547,6 +2039,299 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
           >
             <ArrowLeft size={20} /> Volver al Menú
           </button>
+        </div>
+      )}
+
+      {view === 'fusion' && (
+        <div className="w-full max-w-4xl rounded-3xl bg-gray-900/95 p-8 backdrop-blur-xl border border-purple-500/20 shadow-[0_0_50px_rgba(147,51,234,0.15)] relative overflow-hidden">
+          {/* Fusion Background Effect */}
+          <div className="absolute inset-0 opacity-10 pointer-events-none">
+            <motion.div 
+               animate={{ rotate: 360 }}
+               transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+               className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] border border-dashed border-purple-500 rounded-full"
+            />
+          </div>
+
+          <div className="mb-8 flex items-center justify-between relative z-10">
+            <div className="flex-1 w-fit">
+              <h2 className="text-3xl sm:text-4xl font-black italic tracking-[0.1em] text-white uppercase whitespace-nowrap leading-none flex flex-col items-start">
+                <span>CAJA DE FUSIÓN</span>
+                <span className="text-[12px] sm:text-[14px] font-bold uppercase tracking-widest text-violet-500 mt-1">
+                  Combina 4 fragmentos para crear una habilidad o skin
+                </span>
+              </h2>
+            </div>
+            <div className="flex items-center gap-4">
+              <button onClick={() => setView('main')} className="text-gray-400 hover:text-white transition-colors">
+                <X size={28} />
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 relative z-10">
+             {/* Inventory List */}
+             <div className="lg:col-span-2 space-y-6">
+
+                
+                <div className="max-h-[50vh] overflow-y-auto pr-2 custom-scrollbar space-y-8">
+                  {/* Skin Fragments Section */}
+                  <div>
+                    <h4 className="text-[10px] font-black uppercase tracking-widest text-blue-400 mb-4 border-b border-blue-500/20 pb-1">Fragmentos de Skins</h4>
+                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-4">
+                      {[...ARENA_ITEMS]
+                        .filter(item => !item.id.startsWith('frag_'))
+                        .sort((a, b) => RARITY_ORDER[b.rarity] - RARITY_ORDER[a.rarity])
+                        .map((item) => {
+                        const count = user.inventoryItems?.[item.id] || 0;
+                        return (
+                          <button
+                            key={`fusion-inv-${item.id}`}
+                            onClick={() => !isFusing && setFusingItem(item)}
+                            className={`group relative flex flex-col items-center justify-center p-4 rounded-2xl border-2 transition-all ${fusingItem?.id === item.id ? 'border-purple-500 bg-purple-600/20' : 'border-gray-800 bg-gray-800/50 hover:border-gray-700'} ${count < 1 ? 'opacity-30 grayscale cursor-not-allowed' : ''}`}
+                          >
+                            <div className="mb-2 text-3xl">
+                                {item.type === 'color' ? (
+                                  <div className="w-8 h-8 rounded-full border-2 border-white/20 shadow-md" style={{ backgroundColor: item.value }} />
+                                ) : item.value}
+                            </div>
+                            <span className="text-[8px] font-black uppercase tracking-tighter text-center">{item.name}</span>
+                            <div className="absolute top-2 right-2 flex h-5 w-5 items-center justify-center rounded-full bg-black/60 border border-white/10 text-[10px] font-black">
+                                {count}
+                            </div>
+                            <div className={`mt-1 h-1 w-full rounded-full ${item.rarity === 'common' ? 'bg-gray-500' : item.rarity === 'rare' ? 'bg-blue-500' : item.rarity === 'epic' ? 'bg-purple-500' : 'bg-yellow-500'}`} />
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+
+                      {/* Ability Fragments Section */}
+                      <div>
+                        <div className="flex items-center gap-2 mb-4 border-b border-yellow-500/20 pb-1">
+                          <Zap size={14} className="text-yellow-500" />
+                          <h4 className="text-[10px] font-black uppercase tracking-widest text-yellow-500">Fragmentos de Habilidades</h4>
+                        </div>
+                        <div className="grid grid-cols-3 sm:grid-cols-4 gap-4">
+                          {[...ARENA_ITEMS]
+                            .filter(item => item.id.startsWith('frag_'))
+                            .sort((a, b) => RARITY_ORDER[b.rarity] - RARITY_ORDER[a.rarity])
+                            .map((item) => {
+                            const count = user.inventoryItems?.[item.id] || 0;
+                            return (
+                              <button
+                                key={`fusion-inv-${item.id}`}
+                                onClick={() => !isFusing && setFusingItem(item)}
+                                className={`group relative flex flex-col items-center justify-center p-4 rounded-2xl border-2 transition-all ${fusingItem?.id === item.id ? 'border-purple-500 bg-purple-600/20 shadow-[0_0_15px_rgba(168,85,247,0.2)]' : 'border-gray-800 bg-gray-800/50 hover:border-gray-700'} ${count < 1 ? 'opacity-30 grayscale cursor-not-allowed' : ''}`}
+                              >
+                                <div className="mb-2 text-3xl">
+                                    {item.value}
+                                </div>
+                                <span className="text-[8px] font-black uppercase tracking-tighter text-center">{item.name}</span>
+                                <div className="absolute top-2 right-2 flex h-5 w-5 items-center justify-center rounded-full bg-black/60 border border-white/10 text-[10px] font-black">
+                                    {count}
+                                </div>
+                                <div className={`mt-1 h-1 w-full rounded-full ${item.rarity === 'common' ? 'bg-gray-500' : item.rarity === 'rare' ? 'bg-blue-500' : item.rarity === 'epic' ? 'bg-purple-500' : 'bg-yellow-500'}`} />
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                </div>
+             </div>
+
+             {/* Fusion Slot */}
+             <div className="flex flex-col items-center justify-center bg-white/5 rounded-3xl p-8 border border-white/10 relative overflow-hidden">
+                {!fusingItem ? (
+                  <div className="text-center py-20">
+                    <div className="mx-auto w-16 h-16 rounded-full border-2 border-dashed border-gray-700 flex items-center justify-center mb-4">
+                      <Plus className="text-gray-700" />
+                    </div>
+                    <p className="text-xs text-gray-500 uppercase font-black">Elige un elemento</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="mb-6 text-center">
+                       <h4 className="text-xl font-black italic text-white uppercase tracking-tighter mb-2">Preparando Fusión</h4>
+                       <span className={`inline-block px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${fusingItem.rarity === 'common' ? 'bg-gray-500/20 text-gray-400' : fusingItem.rarity === 'rare' ? 'bg-blue-500/20 text-blue-400' : fusingItem.rarity === 'epic' ? 'bg-purple-500/20 text-purple-400' : 'bg-yellow-500/20 text-yellow-500'}`}>
+                          {fusingItem.rarity}
+                       </span>
+                    </div>
+
+                    <div className="relative mb-6">
+                       <div className="grid grid-cols-4 gap-3">
+                          {[1,2,3,4].map(idx => {
+                            const isSlotOn = (user.inventoryItems?.[fusingItem.id] || 0) >= idx;
+                            return (
+                            <motion.div 
+                               key={`fusion-grid-slot-${idx}`}
+                               animate={isFusing && isSlotOn ? { scale: [1, 1.1, 1], rotate: [0, 5, -5, 0] } : {}}
+                               transition={{ duration: 0.5, repeat: isFusing ? Infinity : 0 }}
+                               className={`w-14 h-14 rounded-2xl border-2 transition-all flex items-center justify-center text-2xl ${isSlotOn ? 'bg-black/60 border-purple-500/50 shadow-[0_0_15px_rgba(168,85,247,0.15)] ring-1 ring-purple-500/20' : 'bg-black/20 border-gray-800 grayscale opacity-30 text-gray-700'}`}
+                            >
+                               {isSlotOn ? (
+                                 fusingItem.type === 'color' ? (
+                                   <div className="w-6 h-6 rounded-full shadow-lg" style={{ backgroundColor: fusingItem.value, boxShadow: `0 0 10px ${fusingItem.value}` }} />
+                                 ) : fusingItem.value
+                               ) : (
+                                 <Plus size={16} />
+                               )}
+                            </motion.div>
+                          );
+                        })}
+                       </div>
+                       
+                       {isFusing && (
+                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                            <motion.div 
+                              animate={{ scale: [1, 1.5, 1], opacity: [0, 0.8, 0] }}
+                              transition={{ duration: 1, repeat: Infinity }}
+                              className="w-32 h-32 rounded-full bg-purple-500 blur-2xl"
+                            />
+                         </div>
+                       )}
+                    </div>
+
+                    <div className="w-full space-y-2">
+                       <div className="flex justify-between items-end text-[10px] font-black uppercase tracking-widest pb-1">
+                          <span className="text-gray-500">Éxito Estimado</span>
+                          <span className={user.coins >= 1000 ? 'text-green-400' : 'text-red-400'}>{SUCCESS_RATES[fusingItem.rarity] * 100}%</span>
+                       </div>
+                       <div className="h-1.5 w-full bg-black/40 rounded-full overflow-hidden">
+                          <motion.div 
+                            initial={{ width: 0 }}
+                            animate={{ width: `${SUCCESS_RATES[fusingItem.rarity] * 100}%` }}
+                            className={`h-full ${fusingItem.rarity === 'common' ? 'bg-gray-500' : fusingItem.rarity === 'rare' ? 'bg-blue-500' : fusingItem.rarity === 'epic' ? 'bg-purple-500' : 'bg-yellow-500'}`}
+                          />
+                       </div>
+
+                       <div className="pt-4 flex flex-col items-center gap-4">
+                          <div className="flex items-center gap-2 text-sm font-black text-gray-300">
+                             COSTE: 1.000 <GoldPointIcon size={16} />
+                          </div>
+                          <button
+                            onClick={() => handleStartFusion(fusingItem)}
+                            disabled={isFusing || user.coins < 1000 || (user.inventoryItems?.[fusingItem.id] || 0) < 4}
+                            className="w-full bg-gradient-to-r from-purple-600 to-blue-600 py-4 rounded-xl text-lg font-black uppercase tracking-tighter hover:from-purple-500 hover:to-blue-500 disabled:opacity-50 disabled:grayscale transition-all shadow-lg active:scale-95"
+                          >
+                             {isFusing ? 'FUSIONANDO...' : 'INICIAR FUSIÓN'}
+                          </button>
+                       </div>
+                    </div>
+                  </>
+                )}
+             </div>
+          </div>
+
+          <div className="mt-8 flex justify-center relative z-10">
+            <button
+              onClick={() => setView('main')}
+              className="flex items-center gap-2 rounded-xl bg-gray-800 px-10 py-4 font-black uppercase tracking-widest text-gray-400 transition-all hover:bg-gray-700 hover:text-white"
+            >
+              <ArrowLeft size={20} /> Volver al Menú
+            </button>
+          </div>
+
+          <AnimatePresence>
+            {isFusing && (
+               <motion.div 
+                 initial={{ opacity: 0 }}
+                 animate={{ opacity: 1 }}
+                 exit={{ opacity: 0 }}
+                 className="fixed inset-0 z-50 flex items-center justify-center bg-black/95 backdrop-blur-md"
+               >
+                  <div className="text-center">
+                     <motion.div
+                       animate={{ 
+                         scale: [1, 1.2, 1],
+                         rotate: 360
+                       }}
+                       transition={{ duration: 4, ease: "easeInOut" }}
+                       className="relative inline-block mb-8"
+                     >
+                        <Zap size={100} className="text-yellow-400" />
+                        <motion.div 
+                          animate={{ opacity: [0, 1, 0], scale: [0.8, 1.2, 0.8] }}
+                          transition={{ duration: 0.5, repeat: Infinity }}
+                          className="absolute inset-0 bg-purple-500/40 blur-3xl rounded-full"
+                        />
+                     </motion.div>
+                     <h3 className="text-3xl font-black italic text-white uppercase tracking-tighter mb-4 animate-pulse uppercase tracking-[0.2em]">FUSIONANDO ELEMENTOS...</h3>
+                     <div className="w-80 h-3 bg-gray-800 rounded-full mx-auto overflow-hidden border border-white/10">
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: "100%" }}
+                          transition={{ duration: 4, ease: "linear" }}
+                          className="h-full bg-gradient-to-r from-purple-500 to-blue-500"
+                        />
+                     </div>
+                     <p className="mt-4 text-[10px] text-gray-500 font-bold uppercase tracking-[0.3em]">No cierres la aplicación</p>
+                  </div>
+               </motion.div>
+            )}
+
+            {fusionResult && (
+               <motion.div 
+                 initial={{ opacity: 0 }}
+                 animate={{ opacity: 1 }}
+                 className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-lg p-4"
+               >
+                  <motion.div 
+                    initial={{ scale: 0.9, y: 20 }}
+                    animate={{ scale: 1, y: 0 }}
+                    className="w-full max-w-sm rounded-[2.5rem] bg-gray-900 border border-white/10 p-10 shadow-2xl text-center"
+                  >
+                     {fusionResult.success ? (
+                       <>
+                         <div className="mx-auto w-24 h-24 rounded-full bg-green-500/20 flex items-center justify-center mb-6 shadow-[0_0_30px_rgba(34,197,94,0.3)]">
+                            <Sparkles size={48} className="text-green-400" />
+                         </div>
+                         <div className="flex flex-col gap-1 items-center">
+                           <h2 className="text-3xl font-black italic text-white uppercase tracking-tighter">¡FELICITACIONES!</h2>
+                           <p className="text-[10px] text-gray-400 uppercase font-bold tracking-widest mb-6 px-4">
+                             Has creado {fusionResult.ability ? 'una habilidad' : 'un skin'} con éxito
+                           </p>
+                         </div>
+                         
+                         <div className="mb-10 bg-white/5 rounded-3xl p-6 border border-white/5">
+                            <div className="text-6xl mb-4">
+                              {fusionResult.ability ? fusionResult.ability.icon : fusionResult.skin?.icon}
+                            </div>
+                            <h4 className="text-xl font-black text-white uppercase">
+                              {fusionResult.ability ? fusionResult.ability.name : fusionResult.skin?.name}
+                            </h4>
+                            <p className="text-[10px] text-blue-400 font-bold uppercase tracking-widest">
+                              {fusionResult.ability ? fusionResult.ability.rarity.toUpperCase() : fusionResult.skin?.rarity.toUpperCase()}
+                            </p>
+                         </div>
+
+                         <button
+                           onClick={handleCollectFusionReward}
+                           className="w-full bg-green-600 hover:bg-green-500 py-5 rounded-2xl text-xl font-black uppercase tracking-tighter transition-all shadow-xl active:scale-95"
+                         >
+                            RECOLECTAR {fusionResult.ability ? 'HABILIDAD' : 'SKIN'}
+                         </button>
+                       </>
+                     ) : (
+                       <>
+                         <div className="mx-auto w-24 h-24 rounded-full bg-red-500/20 flex items-center justify-center mb-6 shadow-[0_0_30px_rgba(239,68,68,0.3)]">
+                            <X size={48} className="text-red-400" />
+                         </div>
+                         <h2 className="text-3xl font-black italic text-white uppercase tracking-tighter mb-2">COMBINACIÓN FALLIDA</h2>
+                         <p className="text-sm text-gray-400 mb-8 font-medium">No te desanimes, la probabilidad no estuvo de tu lado esta vez. ¡Vuelve a intentarlo!</p>
+                         
+                         <button
+                           onClick={() => { setFusionResult(null); setFusingItem(null); }}
+                           className="w-full bg-gray-800 hover:bg-gray-700 py-5 rounded-2xl text-xl font-black uppercase tracking-tighter transition-all active:scale-95 border border-white/5"
+                         >
+                            ACEPTAR
+                         </button>
+                       </>
+                     )}
+                  </motion.div>
+               </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       )}
 
@@ -1680,34 +2465,188 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
         </div>
       )}
       {view === 'inventory' && (
-        <div className="w-full max-w-2xl rounded-3xl bg-gray-900/80 p-8 backdrop-blur-xl">
-          <div className="mb-6 flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <h2 className="text-3xl font-bold">Tus Skins</h2>
-              <div className="flex items-center gap-2 rounded-full bg-gray-800 px-3 py-1">
-                <GoldPointIcon size={14} />
-                <span className="text-sm font-bold">{user.coins}</span>
+        <div className="w-full max-w-4xl rounded-3xl bg-gray-900/80 p-8 backdrop-blur-xl">
+          <div className="mb-8 border-b border-white/5 pb-6">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-4xl font-black italic tracking-tighter text-white uppercase">Inventario</h2>
+              <button onClick={() => setView('main')} className="text-gray-400 hover:text-white transition-all hover:scale-110 active:scale-95">
+                <X size={28} />
+              </button>
+            </div>
+            
+            <div className="flex flex-col items-center justify-center gap-4">
+              <div className="flex bg-black/40 rounded-2xl p-1.5 border border-white/5">
+                <button
+                  onClick={() => setInventoryTab('skins')}
+                  className={`px-8 py-3 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-all ${inventoryTab === 'skins' ? 'bg-blue-600 text-white shadow-[0_0_20px_rgba(37,99,235,0.3)]' : 'text-gray-500 hover:text-gray-300'}`}
+                >
+                  Skins
+                </button>
+                <button
+                  onClick={() => setInventoryTab('abilities')}
+                  className={`px-8 py-3 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-all ${inventoryTab === 'abilities' ? 'bg-blue-600 text-white shadow-[0_0_20px_rgba(37,99,235,0.3)]' : 'text-gray-500 hover:text-gray-300'}`}
+                >
+                  Habilidades
+                </button>
+              </div>
+              
+              <div className="flex items-center gap-4 -mt-2">
+                <div className="flex items-center gap-2 rounded-2xl bg-black/40 border border-white/5 px-4 py-2">
+                  <GoldPointIcon size={14} />
+                  <span className="text-sm font-black text-yellow-500">{user.coins.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center gap-2 rounded-2xl bg-black/40 border border-white/5 px-4 py-2">
+                  <MonedasIcon size={14} />
+                  <span className="text-sm font-black text-blue-400">{user.monedas.toLocaleString()}</span>
+                </div>
               </div>
             </div>
-            <button onClick={() => setView('main')} className="text-gray-400 hover:text-white">Cerrar</button>
           </div>
-          <div className="grid grid-cols-3 gap-4 sm:grid-cols-4">
-            {ALL_SKINS.filter(s => user.ownedSkins.includes(s.id)).map((skin, idx) => (
-              <button
-                key={`owned-skin-${skin.id}-${idx}`}
-                onClick={() => handleEquip(skin.id)}
-                className={`group relative flex flex-col items-center rounded-2xl border-2 p-4 transition-all ${user.equippedSkin === skin.id ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-800 hover:border-gray-500'}`}
-              >
-                <span className="mb-2 text-4xl">{skin.icon}</span>
-                <span className="text-xs font-bold uppercase tracking-tighter">{skin.name}</span>
-                {user.equippedSkin === skin.id && (
-                  <div className="absolute -right-2 -top-2 rounded-full bg-blue-500 p-1">
-                    <Play size={12} fill="white" />
+          
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 max-h-[60vh] overflow-y-auto pr-2 custom-scrollbar">
+            {inventoryTab === 'skins' ? (() => {
+              const uniqueSkins = Array.from(new Set(user.ownedSkins));
+              return uniqueSkins
+                .map(id => ALL_SKINS.find(s => s.id === id)!)
+                .filter(Boolean)
+                .sort((a, b) => RARITY_ORDER[b.rarity] - RARITY_ORDER[a.rarity])
+                .map((skin, idx) => {
+                const skinId = skin.id;
+                const count = user.ownedSkins.filter(id => id === skinId).length;
+                const isEquipped = user.equippedSkin === skinId;
+                const isPointSkin = (skin.currency || 'coins') === 'coins';
+                const sellPrice = Math.floor((skin.price || (skin.rarity === 'legendary' ? 15000 : skin.rarity === 'epic' ? 10000 : skin.rarity === 'rare' ? 5000 : 2000)) * 0.5);
+
+                return (
+                  <div
+                    key={`inv-skin-render-${skinId}-${idx}-${count}`}
+                    className={`group relative flex flex-col items-center rounded-2xl border-2 p-4 transition-all ${isEquipped ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-800'}`}
+                  >
+                    {/* Quantity Badge */}
+                    <div className="absolute -right-2 -top-2 z-10 rounded-full bg-yellow-600 px-2.5 py-1 text-xs font-black text-white shadow-lg border border-yellow-400/50">
+                      x{count}
+                    </div>
+
+                    <span className="mb-2 text-4xl">{skin.icon}</span>
+                    <span className="text-xs font-black uppercase tracking-tighter text-white mb-3">{skin.name}</span>
+                    
+                    <div className="flex flex-col w-full gap-2 mt-auto">
+                      <button
+                        onClick={() => handleEquip(skin.id)}
+                        className={`w-full rounded-lg py-1.5 text-[10px] font-black uppercase tracking-widest transition-all ${isEquipped ? 'bg-blue-600 text-white cursor-default' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                      >
+                        {isEquipped ? 'Equipado' : 'Equipar'}
+                      </button>
+
+                      {skinId !== 'default' && (
+                        <>
+                          <button
+                            onClick={() => handleSellToSystem(skin)}
+                            className="w-full rounded-lg py-1.5 text-[10px] font-black uppercase tracking-widest bg-red-600/20 text-red-400 border border-red-500/30 hover:bg-red-600/40 transition-all flex items-center justify-center gap-2"
+                          >
+                            <span>Vender</span>
+                            <GoldPointIcon size={12} />
+                          </button>
+
+                          <button
+                            onClick={() => setShowListModal({ skin })}
+                            className="w-full rounded-lg py-1.5 text-[10px] font-black uppercase tracking-widest bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600/40 transition-all flex items-center justify-center gap-2"
+                          >
+                            <span>Vender</span>
+                            <MonedasIcon size={12} />
+                          </button>
+                        </>
+                      )}
+                    </div>
+
+                    {isEquipped && (
+                      <div className="absolute left-2 top-2 rounded-full bg-blue-500/20 p-1">
+                        <Check size={10} className="text-blue-400" />
+                      </div>
+                    )}
                   </div>
-                )}
-              </button>
-            ))}
+                );
+              });
+            })() : (() => {
+              const sortedAbilities = [...ALL_ABILITIES].sort((a, b) => RARITY_ORDER[b.rarity] - RARITY_ORDER[a.rarity]);
+              return sortedAbilities.map((ability, idx) => {
+                const count = user.inventoryAbilities?.[ability.id] || 0;
+                const isEquipped = (user.equippedAbilities || []).includes(ability.id);
+                const isUnlocked = count > 0;
+
+                return (
+                  <div
+                    key={`inv-ability-render-${ability.id}-${idx}-${count}`}
+                    className={`group relative flex flex-col items-center rounded-2xl border-2 p-4 transition-all ${isEquipped ? 'border-yellow-500 bg-yellow-500/10' : isUnlocked ? 'border-gray-700 bg-gray-800' : 'border-gray-800 bg-black/40 grayscale'}`}
+                  >
+                    {!isUnlocked && (
+                      <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 rounded-2xl backdrop-blur-[1px]">
+                        <div className="flex flex-col items-center gap-1">
+                          <ShieldCheck size={24} className="text-gray-500" />
+                          <span className="text-[10px] font-black uppercase tracking-widest text-gray-500">Bloqueado</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {isUnlocked && (
+                      <div className="absolute -right-2 -top-2 z-10 rounded-full bg-blue-600 px-2.5 py-1 text-xs font-black text-white shadow-lg border border-blue-400/50">
+                        x{count}
+                      </div>
+                    )}
+
+                    <span className="mb-2 text-4xl">{ability.icon}</span>
+                    <span className="text-xs font-black uppercase tracking-tighter text-white mb-1">{ability.name}</span>
+                    <p className="text-[8px] text-gray-400 text-center mb-3 line-clamp-2 h-4">{ability.description}</p>
+                    
+                    {isUnlocked && (
+                      <div className="flex flex-col w-full gap-2 mt-auto relative z-30">
+                        <button
+                          onClick={() => handleEquipAbility(ability.id)}
+                          className={`w-full rounded-lg py-1.5 text-[10px] font-black uppercase tracking-widest transition-all ${isEquipped ? 'bg-yellow-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                        >
+                          {isEquipped ? 'Desequipar' : 'Equipar'}
+                        </button>
+
+                        <button
+                          onClick={() => handleSellAbilityToSystem(ability)}
+                          className="w-full rounded-lg py-1.5 text-[10px] font-black uppercase tracking-widest bg-red-600/20 text-red-400 border border-red-500/30 hover:bg-red-600/40 transition-all flex items-center justify-center gap-2"
+                        >
+                          <span>Vender</span>
+                          <GoldPointIcon size={12} />
+                        </button>
+
+                        <button
+                          onClick={() => setShowAbilityListingModal({ ability })}
+                          className="w-full rounded-lg py-1.5 text-[10px] font-black uppercase tracking-widest bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600/40 transition-all flex items-center justify-center gap-2"
+                        >
+                          <span>Vender</span>
+                          <MonedasIcon size={12} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              });
+            })()}
           </div>
+
+          {/* Feedback Message */}
+          <div className="h-10 mt-4 overflow-hidden">
+            <AnimatePresence mode="wait">
+              {profileMessage && (
+                <motion.div
+                  key={`inventory-msg-${profileMessage.text}`}
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 1.1 }}
+                  className={`rounded-xl p-2 text-center text-[10px] font-black uppercase tracking-widest ${profileMessage.type === 'success' ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'}`}
+                >
+                  {profileMessage.text}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
           <div className="mt-8 flex justify-center">
             <button
               onClick={() => setView('main')}
@@ -1724,16 +2663,18 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
           <div className="mb-8 flex items-center justify-between">
             <h2 className="text-4xl font-black italic tracking-tighter text-yellow-500 uppercase">Tienda</h2>
             <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2 rounded-full bg-gray-800 px-4 py-2">
-                <GoldPointIcon size={16} />
-                <span className="font-black text-yellow-500">{user.coins}</span>
+              <div className="flex flex-col gap-2 items-end">
+                <div className="flex items-center gap-2 rounded-full bg-gray-800 px-4 py-1.5">
+                  <GoldPointIcon size={14} />
+                  <span className="text-sm font-black text-yellow-500 tracking-tighter">{user.coins.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center gap-2 rounded-full bg-gray-800 px-4 py-1.5">
+                  <MonedasIcon size={14} />
+                  <span className="text-sm font-black text-blue-400 tracking-tighter">{user.monedas.toLocaleString()}</span>
+                </div>
               </div>
-              <div className="flex items-center gap-2 rounded-full bg-gray-800 px-4 py-2">
-                <MonedasIcon size={16} />
-                <span className="font-black text-blue-400">{user.monedas}</span>
-              </div>
-              <button onClick={() => setView('main')} className="text-gray-400 hover:text-white">
-                <X size={24} />
+              <button onClick={() => setView('main')} className="text-gray-400 hover:text-white transition-colors">
+                <X size={28} />
               </button>
             </div>
           </div>
@@ -1745,8 +2686,22 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 <h3 className="text-xl font-black uppercase tracking-widest text-white border-l-4 border-yellow-500 pl-4">Skins Disponibles</h3>
               </div>
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                {ALL_SKINS.filter(s => !user.ownedSkins.includes(s.id)).map((skin, idx) => {
-                  let price = skin.price || (skin.rarity === 'legendary' ? 10000 : skin.rarity === 'epic' ? 5000 : skin.rarity === 'rare' ? 2500 : 1000);
+                {[...ALL_SKINS]
+                  .sort((a, b) => {
+                    const currencyA = a.currency || 'coins';
+                    const currencyB = b.currency || 'coins';
+                    
+                    // First sort by currency: coins (points) first, then monedas (money)
+                    if (currencyA !== currencyB) {
+                      return currencyA === 'coins' ? -1 : 1;
+                    }
+                    
+                    // Then by price: cheapest to expensive
+                    const getBasePrice = (s: Skin) => s.price || (s.rarity === 'legendary' ? 15000 : s.rarity === 'epic' ? 10000 : s.rarity === 'rare' ? 5000 : 2000);
+                    return getBasePrice(a) - getBasePrice(b);
+                  })
+                  .map((skin, idx) => {
+                  let price = skin.price || (skin.rarity === 'legendary' ? 15000 : skin.rarity === 'epic' ? 10000 : skin.rarity === 'rare' ? 5000 : 2000);
                   const currency = skin.currency || 'coins';
                   const userBalance = currency === 'coins' ? user.coins : user.monedas;
                   
@@ -1764,6 +2719,11 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       disabled={userBalance < price}
                       className={`group relative flex flex-col items-center rounded-2xl border-2 border-gray-700 bg-gray-800 p-4 transition-all hover:border-yellow-500 disabled:opacity-50`}
                     >
+                      {user.ownedSkins.includes(skin.id) && (
+                        <div className="absolute -top-2 -left-2 z-10 rounded-full bg-blue-500 px-2 py-0.5 text-[10px] font-black text-white shadow-lg">
+                          Posesión: {user.ownedSkins.filter(id => id === skin.id).length}
+                        </div>
+                      )}
                       {isDiscountDay && (
                         <div className="absolute -top-2 -right-2 z-10 rounded-full bg-red-500 px-2 py-0.5 text-[10px] font-black text-white shadow-lg">
                           -10%
@@ -1771,9 +2731,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       )}
                       <span className="mb-2 text-4xl">{skin.icon}</span>
                       <span className="text-xs font-bold uppercase tracking-tighter">{skin.name}</span>
-                      <span className={`mt-2 flex items-center gap-1 text-sm font-black ${currency === 'coins' ? 'text-yellow-500' : 'text-blue-400'}`}>
+                      <div className={`mt-2 flex items-center gap-1 text-sm font-black ${currency === 'coins' ? 'text-yellow-500' : 'text-blue-400'}`}>
                         {price} {currency === 'coins' ? <GoldPointIcon size={14} /> : <MonedasIcon size={14} />}
-                      </span>
+                      </div>
                     </button>
                   );
                 })}
@@ -1938,6 +2898,47 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
               <ArrowLeft size={20} /> Volver al Menú
             </button>
           </div>
+
+          <AnimatePresence>
+            {purchaseConfirmation && (
+              <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 px-4 backdrop-blur-sm">
+                <motion.div
+                  initial={{ scale: 0.9, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.9, opacity: 0 }}
+                  className="w-full max-w-sm rounded-3xl border border-white/10 bg-gray-900 p-8 shadow-2xl"
+                >
+                  <div className="mb-6 text-center">
+                    <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-blue-500/20 text-5xl">
+                      {purchaseConfirmation.skin.icon}
+                    </div>
+                    <h3 className="text-2xl font-black uppercase tracking-tighter text-white">¿Confirmar Compra?</h3>
+                    <p className="mt-2 text-sm text-gray-400 leading-relaxed px-4">
+                      ¿Quieres comprar <span className="font-bold text-white">{purchaseConfirmation.skin.name}</span> por {' '}
+                      <span className={`font-black ${(purchaseConfirmation.skin.currency || 'coins') === 'monedas' ? 'text-blue-400' : 'text-yellow-500'}`}>
+                        {purchaseConfirmation.price.toLocaleString()} {(purchaseConfirmation.skin.currency || 'coins') === 'monedas' ? 'Monedas' : 'Puntos'}
+                      </span>?
+                    </p>
+                  </div>
+
+                  <div className="flex gap-4">
+                    <button
+                      onClick={() => setPurchaseConfirmation(null)}
+                      className="flex-1 rounded-xl bg-gray-800 py-3 font-bold text-gray-400 transition-colors hover:bg-gray-700 hover:text-white"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      onClick={() => executePurchase(purchaseConfirmation.skin, purchaseConfirmation.price)}
+                      className="flex-1 rounded-xl bg-blue-600 py-3 font-bold text-white shadow-lg shadow-blue-600/20 transition-all hover:bg-blue-50 hover:text-blue-600 active:scale-95"
+                    >
+                      Comprar
+                    </button>
+                  </div>
+                </motion.div>
+              </div>
+            )}
+          </AnimatePresence>
         </div>
       )}
 
@@ -1958,7 +2959,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             <div className="mb-8 flex gap-2">
               {(['basica', 'pro', 'millonario'] as const).map(cat => (
                 <button
-                  key={cat}
+                  key={`wager-category-${cat}`}
                   onClick={() => setSelectedCategory(cat)}
                   className={`flex-1 rounded-xl py-3 text-xs font-black uppercase tracking-widest transition-all ${selectedCategory === cat ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
                 >
@@ -1970,11 +2971,11 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             <div className="grid grid-cols-2 gap-4">
               {(() => {
                 const categories = {
-                  basica: [10, 50, 100, 150],
-                  pro: [200, 500, 1000, 2000],
-                  millonario: [3000, 4000, 5000, 6000]
+                  basica: [50, 100, 150, 200],
+                  pro: [500, 1000, 2000, 3000],
+                  millonario: [5000, 7500, 10000, 15000]
                 };
-                const growthMapping = [10, 50, 100, 150];
+                const growthMapping = [50, 100, 150, 200];
                 
                 return categories[selectedCategory].map((val, idx) => {
                   const isLocked = (selectedCategory === 'pro' && (!user.proAccessUntil || user.proAccessUntil < Date.now())) ||
@@ -1988,8 +2989,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       key={`wager-${selectedCategory}-${val}-${idx}`}
                       onClick={() => {
                         if (isLocked) {
-                          setTicketMessage({ text: `Debes comprar la entrada ${selectedCategory.toUpperCase()} en la tienda`, type: 'error' });
-                          setTimeout(() => setTicketMessage(null), 3000);
+                          setShowArenaTicketsModal(true);
                           return;
                         }
                         onStartWager(val, growthMapping[idx], selectedCategory);
@@ -2351,15 +3351,28 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 </div>
               </div>
 
-              <div className={`flex items-center justify-center gap-2 py-3 rounded-2xl font-black uppercase tracking-widest text-xs ${selectedMedal.unlocked ? 'bg-green-500/20 text-green-400' : 'bg-gray-800 text-gray-500'}`}>
+              <div className={`flex flex-col items-center justify-center gap-4 py-3 rounded-2xl font-black uppercase tracking-widest text-xs ${selectedMedal.unlocked ? 'bg-green-500/20 text-green-400 border border-green-500/10' : 'bg-gray-800 text-gray-500'}`}>
                 {selectedMedal.unlocked ? (
                   <>
-                    <ShieldCheck size={16} /> ¡DESBLOQUEADA!
+                    <div className="flex items-center gap-2">
+                       <ShieldCheck size={16} /> ¡DESBLOQUEADA!
+                    </div>
+                    {selectedMedal.id === 'f_p' && !user.claimedPlatinumReward && (
+                      <button
+                        onClick={() => handleClaimMedalReward('f_p')}
+                        className="bg-yellow-500 text-black px-6 py-3 rounded-xl text-xs font-black shadow-lg shadow-yellow-500/20 hover:bg-yellow-400 active:scale-95 transition-all"
+                      >
+                        RECLAMAR SKIN "RAYO ETERNO"
+                      </button>
+                    )}
+                    {selectedMedal.id === 'f_p' && user.claimedPlatinumReward && (
+                      <span className="text-[10px] text-yellow-500">Recompensa Reclamada ✓</span>
+                    )}
                   </>
                 ) : (
-                  <>
+                  <div className="flex items-center gap-2">
                     <X size={16} /> BLOQUEADA
-                  </>
+                  </div>
                 )}
               </div>
             </motion.div>
@@ -2448,6 +3461,85 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 >
                   Volver Atrás
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {showArenaTicketsModal && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="w-full max-w-4xl rounded-3xl border border-blue-500/30 bg-gray-900 p-8 shadow-2xl max-h-[90vh] overflow-y-auto custom-scrollbar"
+            >
+              <div className="mb-8 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="rounded-xl bg-blue-500/20 p-2">
+                    <ShieldCheck className="text-blue-400" size={24} />
+                  </div>
+                  <h3 className="text-2xl font-black italic tracking-tighter text-blue-400 uppercase">Entradas de Arena</h3>
+                </div>
+                <button onClick={() => setShowArenaTicketsModal(false)} className="text-gray-500 hover:text-white">
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+                <div className="rounded-3xl border border-blue-500/30 bg-blue-900/20 p-8 text-center backdrop-blur-md">
+                  <div className="mb-4 flex justify-center">
+                    <div className="rounded-full bg-blue-500/20 p-4">
+                      <ShieldCheck size={48} className="text-blue-400" />
+                    </div>
+                  </div>
+                  <h3 className="text-2xl font-black uppercase tracking-tighter text-white">Entrada Arena PRO</h3>
+                  <p className="mt-2 text-sm text-gray-400">Acceso ilimitado por 24 horas a la categoría PRO</p>
+                  <div className="mt-6 flex flex-col items-center justify-center gap-2">
+                    <div className="flex items-center gap-2">
+                      <GoldPointIcon size={20} />
+                      <span className="text-2xl font-black text-yellow-500">5000</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <MonedasIcon size={20} />
+                      <span className="text-2xl font-black text-blue-400">500</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleBuyTicket('pro', 5000, 500)}
+                    disabled={user.coins < 5000 || user.monedas < 500 || (user.proAccessUntil && user.proAccessUntil > Date.now())}
+                    className="mt-8 w-full rounded-xl bg-blue-600 py-4 font-black uppercase tracking-widest text-white transition-all hover:bg-blue-500 disabled:opacity-50"
+                  >
+                    {user.proAccessUntil && user.proAccessUntil > Date.now() ? 'Entrada Activa' : 'Comprar Entrada'}
+                  </button>
+                </div>
+
+                <div className="rounded-3xl border border-yellow-500/30 bg-yellow-900/20 p-8 text-center backdrop-blur-md">
+                  <div className="mb-4 flex justify-center">
+                    <div className="rounded-full bg-yellow-500/20 p-4">
+                      <Trophy size={48} className="text-yellow-500" />
+                    </div>
+                  </div>
+                  <h3 className="text-2xl font-black uppercase tracking-tighter text-white">Entrada Arena MILLONARIO</h3>
+                  <p className="mt-2 text-sm text-gray-400">Acceso ilimitado por 24 horas a la categoría MILLONARIO</p>
+                  <div className="mt-6 flex flex-col items-center justify-center gap-2">
+                    <div className="flex items-center gap-2">
+                      <GoldPointIcon size={20} />
+                      <span className="text-2xl font-black text-yellow-500">10000</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <MonedasIcon size={20} />
+                      <span className="text-2xl font-black text-blue-400">1000</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleBuyTicket('millonario', 10000, 1000)}
+                    disabled={user.coins < 10000 || user.monedas < 1000 || (user.millonarioAccessUntil && user.millonarioAccessUntil > Date.now())}
+                    className="mt-8 w-full rounded-xl bg-yellow-600 py-4 font-black uppercase tracking-widest text-white transition-all hover:bg-yellow-500 disabled:opacity-50"
+                  >
+                    {user.millonarioAccessUntil && user.millonarioAccessUntil > Date.now() ? 'Entrada Activa' : 'Comprar Entrada'}
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>
@@ -2582,10 +3674,131 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                           </span>
                         )}
                       </button>
+
+                      <button 
+                        onClick={() => setFriendToDelete({ id: friendship.id, name: selectedFriend.displayName })}
+                        className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-red-900/20 py-3 text-[10px] font-black uppercase tracking-widest text-red-500 hover:bg-red-900/40 transition-all border border-red-500/10"
+                      >
+                        <UserMinus size={14} /> Eliminar Amigo
+                      </button>
+                    </div>
+
+                    {/* Friend's Marketplace */}
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-2 px-1">
+                        <ShoppingBag size={14} className="text-blue-400" />
+                        <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-gray-500">Mercado de {selectedFriend.displayName}</h4>
+                      </div>
+                      
+                      <div className="max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                        {(() => {
+                          const friendListings = listings
+                            .filter(l => l.sellerId === selectedFriend.id && l.status === 'active')
+                            .sort((a, b) => b.timestamp - a.timestamp);
+                          
+                          if (friendListings.length === 0) {
+                            return (
+                              <div className="flex items-center justify-center py-8 rounded-2xl bg-white/5 border border-white/5 border-dashed">
+                                <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest text-center px-4">
+                                  Este amigo no tiene skins publicadas actualmente
+                                </p>
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <div className="space-y-2">
+                              {friendListings.map((listing) => {
+                                const skin = ALL_SKINS.find(s => s.id === listing.skinId);
+                                if (!skin) return null;
+                                return (
+                                  <div 
+                                    key={`friend-listing-${listing.id}`}
+                                    className="flex items-center justify-between rounded-2xl bg-black/40 border border-white/10 p-3 hover:border-blue-500/30 transition-colors"
+                                  >
+                                    <div className="flex items-center gap-3">
+                                      <span className="text-2xl">{skin.icon}</span>
+                                      <div>
+                                        <p className="text-[10px] font-black text-white uppercase leading-none">{skin.name}</p>
+                                        <div className="flex items-center gap-1 mt-1">
+                                          <MonedasIcon size={10} />
+                                          <span className="text-xs font-black text-blue-400">{listing.price.toLocaleString()}</span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                    <button 
+                                      onClick={() => handleBuyFromFriend(listing)}
+                                      disabled={user.monedas < listing.price}
+                                      className="rounded-xl bg-blue-600 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-white hover:bg-blue-500 disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-blue-600/20"
+                                    >
+                                      Comprar
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })()}
+                      </div>
                     </div>
                   </div>
                 );
               })()}
+            </motion.div>
+          </div>
+        )}
+
+        {/* List Skin Modal */}
+        {showListModal && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/95 p-4 backdrop-blur-xl">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="w-full max-w-sm rounded-[2.5rem] bg-gray-900 p-8 border border-white/10 shadow-3xl text-center"
+            >
+              <h3 className="text-2xl font-black italic tracking-tighter text-white uppercase mb-6">Poner en Venta</h3>
+              
+              <div className="mb-8 p-6 rounded-3xl bg-black/40 border border-white/5 inline-block mx-auto">
+                <span className="text-6xl block mb-2">{showListModal.skin.icon}</span>
+                <span className="text-sm font-black text-gray-400 uppercase tracking-widest">{showListModal.skin.name}</span>
+              </div>
+
+              <div className="space-y-6">
+                <div>
+                  <label className="mb-2 block text-[10px] font-bold uppercase tracking-widest text-gray-500 text-left px-2">Precio en Monedas</label>
+                  <div className="relative">
+                    <div className="absolute left-4 top-1/2 -translate-y-1/2">
+                      <MonedasIcon size={24} />
+                    </div>
+                    <input 
+                      type="number"
+                      value={listPrice}
+                      onChange={(e) => setListPrice(Math.max(1, parseInt(e.target.value) || 0))}
+                      className="w-full rounded-2xl bg-black/60 px-14 py-5 text-3xl font-black text-white outline-none ring-2 ring-blue-500/20 focus:ring-blue-500 shadow-xl"
+                    />
+                  </div>
+                  <p className="mt-3 text-[10px] text-gray-500 font-bold uppercase tracking-tight leading-relaxed px-4">
+                    Tus amigos verán esta oferta en tu perfil y podrán comprarla al instante.
+                  </p>
+                </div>
+
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => setShowListModal(null)}
+                    disabled={isListing}
+                    className="flex-1 rounded-2xl bg-gray-800 py-4 font-bold text-gray-400 hover:bg-gray-700 uppercase tracking-widest shadow-lg disabled:opacity-50"
+                  >
+                    Cerrar
+                  </button>
+                  <button 
+                    onClick={() => handleListSkin(showListModal.skin, listPrice)}
+                    disabled={isListing}
+                    className="flex-1 rounded-2xl bg-blue-600 py-4 font-black uppercase tracking-widest text-white hover:bg-blue-500 shadow-lg shadow-blue-600/30 active:scale-95 transition-all disabled:opacity-50"
+                  >
+                    {isListing ? 'publicando...' : 'Publicar'}
+                  </button>
+                </div>
+              </div>
             </motion.div>
           </div>
         )}
@@ -2784,6 +3997,278 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                     )}
                   </button>
                 </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Training Difficulty Modal */}
+        <AnimatePresence>
+          {showTrainingModal && (
+            <div className="fixed inset-0 z-[220] flex items-center justify-center bg-black/90 p-4 backdrop-blur-sm" onClick={() => setShowTrainingModal(false)}>
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                onClick={(e) => e.stopPropagation()}
+                className="w-full max-w-sm rounded-[2.5rem] border border-white/10 bg-gray-900 p-8 shadow-2xl text-center"
+              >
+                <div className="mb-6 flex justify-center">
+                  <div className="rounded-2xl bg-blue-500/20 p-4">
+                    <GoldPointIcon size={40} />
+                  </div>
+                </div>
+                <h3 className="mb-2 text-2xl font-black uppercase tracking-tighter text-white">JUGAR POR PUNTOS</h3>
+                <p className="mb-8 text-sm text-gray-400">Selecciona la dificultad</p>
+                
+                <div className="space-y-4">
+                  <button 
+                    onClick={() => {
+                      onStartTraining(3);
+                      setShowTrainingModal(false);
+                    }}
+                    className="group flex w-full items-center justify-between rounded-2xl bg-white/5 p-5 border border-white/5 hover:border-green-500/30 hover:bg-green-500/10 transition-all"
+                  >
+                    <div className="text-left">
+                      <p className="text-lg font-black text-white uppercase tracking-tighter">Modo Fácil</p>
+                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Hasta 3 usuarios - ideal para practicar</p>
+                    </div>
+                    <Check size={24} className="text-green-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </button>
+
+                  <button 
+                    onClick={() => {
+                      onStartTraining(100);
+                      setShowTrainingModal(false);
+                    }}
+                    className="group flex w-full items-center justify-between rounded-2xl bg-white/5 p-5 border border-white/5 hover:border-red-500/30 hover:bg-red-500/10 transition-all"
+                  >
+                    <div className="text-left">
+                      <p className="text-lg font-black text-white uppercase tracking-tighter">Modo Difícil</p>
+                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Hasta 100 usuarios - desafío extremo</p>
+                    </div>
+                    <Zap size={24} className="text-red-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </button>
+                </div>
+
+                <button 
+                  onClick={() => setShowTrainingModal(false)}
+                  className="mt-8 text-[10px] font-black uppercase tracking-widest text-gray-600 hover:text-white transition-colors"
+                >
+                  Cancelar
+                </button>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Settings Modal */}
+        <AnimatePresence>
+          {showSettings && (
+            <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-md p-4" onClick={() => setShowSettings(false)}>
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                onClick={(e) => e.stopPropagation()}
+                className="w-full max-w-sm rounded-[2.5rem] bg-gray-900 border border-white/10 shadow-3xl overflow-hidden"
+              >
+                <div className="bg-gradient-to-r from-gray-800 to-gray-900 p-6 flex items-center justify-between border-b border-white/5">
+                  <div className="flex items-center gap-3">
+                    <div className="rounded-xl bg-blue-500/20 p-2">
+                      <Settings className="text-blue-400" size={20} />
+                    </div>
+                    <h3 className="text-xl font-black italic tracking-tighter text-white uppercase">Ajustes</h3>
+                  </div>
+                  <button onClick={() => setShowSettings(false)} className="text-gray-500 hover:text-white transition-colors">
+                    <X size={24} />
+                  </button>
+                </div>
+
+                <div className="p-6 space-y-4">
+                  {/* Audio Toggles */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <button 
+                      onClick={() => {
+                          const next = !musicEnabled;
+                          setMusicEnabled(next);
+                          soundManager.toggleMusic(next);
+                      }}
+                      className={`flex items-center justify-center gap-2 rounded-2xl p-4 font-bold border transition-all ${musicEnabled ? 'bg-blue-600/20 border-blue-500/30 text-blue-400' : 'bg-gray-800 border-white/5 text-gray-500'}`}
+                    >
+                      {musicEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+                      <span className="text-[10px] uppercase tracking-widest">Música</span>
+                    </button>
+                    <button 
+                      onClick={() => {
+                          const next = !sfxEnabled;
+                          setSfxEnabled(next);
+                          soundManager.toggleSFX(next);
+                      }}
+                      className={`flex items-center justify-center gap-2 rounded-2xl p-4 font-bold border transition-all ${sfxEnabled ? 'bg-blue-600/20 border-blue-500/30 text-blue-400' : 'bg-gray-800 border-white/5 text-gray-500'}`}
+                    >
+                      {sfxEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+                      <span className="text-[10px] uppercase tracking-widest">SFX</span>
+                    </button>
+                  </div>
+
+                  {/* Music Volume Slider */}
+                  <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
+                    <div className="flex justify-between items-center mb-3">
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Volumen Música</span>
+                      <span className="text-[10px] font-black text-blue-400">{Math.round(musicVolume * 100)}%</span>
+                    </div>
+                    <input 
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={musicVolume}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setMusicVolume(val);
+                        soundManager.setMusicVolume(val);
+                      }}
+                      className="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+
+                  {/* Controls Button */}
+                  <button 
+                    onClick={() => setShowControls(true)}
+                    className="flex w-full items-center justify-between rounded-2xl bg-gray-800 p-4 font-bold border border-white/5 hover:bg-gray-700 transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <Gamepad2 size={20} className="text-purple-400" />
+                      <span className="text-[10px] uppercase tracking-widest">Ver Controles</span>
+                    </div>
+                    <Plus size={16} className="text-gray-600" />
+                  </button>
+
+                  {/* Change Username Shortcut */}
+                  <button 
+                    onClick={() => {
+                      setView('profile');
+                      setShowSettings(false);
+                    }}
+                    className="flex w-full items-center justify-between rounded-2xl bg-gray-800 p-4 font-bold border border-white/5 hover:bg-gray-700 transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <UserIcon size={20} className="text-blue-400" />
+                      <div className="text-left">
+                        <p className="text-[10px] uppercase tracking-widest">Cambiar Nombre</p>
+                        <p className="text-[8px] text-gray-500">Actual: {user.displayName}</p>
+                      </div>
+                    </div>
+                    <Check size={16} className="text-blue-500" />
+                  </button>
+
+                  {/* High Quality Toggle (Recommended detail) */}
+                  <button 
+                    onClick={() => setHighQuality(!highQuality)}
+                    className={`flex w-full items-center justify-between rounded-2xl p-4 font-bold border transition-all ${highQuality ? 'bg-green-600/10 border-green-500/20 text-green-400' : 'bg-gray-800 border-white/5 text-gray-500'}`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <Sparkles size={20} className={highQuality ? 'text-green-400' : 'text-gray-500'} />
+                      <div className="text-left">
+                        <p className="text-[10px] uppercase tracking-widest">Efectos Especiales</p>
+                        <p className="text-[8px] opacity-70">Aumenta los detalles visuales</p>
+                      </div>
+                    </div>
+                    <div className={`w-10 h-5 rounded-full relative transition-colors ${highQuality ? 'bg-green-500' : 'bg-gray-600'}`}>
+                      <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${highQuality ? 'left-6' : 'left-1'}`} />
+                    </div>
+                  </button>
+                </div>
+
+                <div className="p-6 bg-black/20 text-center">
+                  <p className="text-[9px] font-black uppercase tracking-[0.2em] text-gray-600">Viborita v2.4.0 • Ai Studio</p>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Delete Friend Confirmation Modal */}
+        <AnimatePresence>
+          {friendToDelete && (
+            <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/95 p-4 backdrop-blur-xl">
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                className="w-full max-w-sm rounded-[2.5rem] border border-red-500/30 bg-gray-900 p-8 shadow-2xl text-center"
+              >
+                <div className="mb-6 flex justify-center">
+                  <div className="rounded-2xl bg-red-500/20 p-4">
+                    <Trash2 size={40} className="text-red-400" />
+                  </div>
+                </div>
+                <h3 className="mb-2 text-2xl font-black uppercase tracking-tighter text-white">¿Eliminar Amigo?</h3>
+                <p className="mb-8 text-sm text-gray-400">¿Estás seguro de que quieres eliminar a <span className="text-white font-bold">{friendToDelete.name}</span> de tu lista de amigos?</p>
+                
+                <div className="flex flex-col gap-3">
+                  <button 
+                    onClick={handleDeleteFriendship}
+                    className="w-full rounded-2xl bg-red-600 py-4 text-sm font-black uppercase tracking-widest text-white hover:bg-red-500 transition-all shadow-lg shadow-red-600/20"
+                  >
+                    Sí, Eliminar
+                  </button>
+                  <button 
+                    onClick={() => setFriendToDelete(null)}
+                    className="w-full rounded-2xl bg-gray-800 py-4 text-sm font-black uppercase tracking-widest text-gray-400 hover:text-white transition-all border border-white/5"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Controls Detail Modal */}
+        <AnimatePresence>
+          {showControls && (
+            <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/90 p-4" onClick={() => setShowControls(false)}>
+               <motion.div
+                initial={{ y: 20, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                exit={{ y: 20, opacity: 0 }}
+                onClick={(e) => e.stopPropagation()}
+                className="w-full max-w-sm rounded-[2.5rem] bg-gray-900 border border-white/10 p-8 shadow-2xl text-center"
+              >
+                <div className="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-purple-500/20">
+                  <Gamepad2 size={32} className="text-purple-400" />
+                </div>
+                <h3 className="text-xl font-black uppercase tracking-tighter text-white mb-6">¿Cómo jugar?</h3>
+                
+                <div className="space-y-4 text-left">
+                  <div className="flex items-center gap-4 bg-white/5 p-3 rounded-xl border border-white/5">
+                    <div className="flex-1">
+                      <p className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-1">Movimiento</p>
+                      <p className="text-xs text-gray-300">Usa el mouse o el dedo para que la cabeza siga el cursor. La viborita siempre avanza.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4 bg-white/5 p-3 rounded-xl border border-white/5">
+                    <div className="flex-1">
+                      <p className="text-[10px] font-bold text-yellow-500 uppercase tracking-widest mb-1">Impulso (Turbo)</p>
+                      <p className="text-xs text-gray-300">Mantén presionado el clic o la pantalla para ir más rápido. Consume un poco de puntos/masa.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4 bg-white/5 p-3 rounded-xl border border-white/5">
+                    <div className="flex-1">
+                      <p className="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-1">Regla de Oro</p>
+                      <p className="text-xs text-gray-300">Si tu cabeza toca el cuerpo de otra viborita, explotas. ¡Haz que los demás te toquen a ti!</p>
+                    </div>
+                  </div>
+                </div>
+
+                <button 
+                  onClick={() => setShowControls(false)}
+                  className="mt-8 w-full rounded-2xl bg-blue-600 py-4 font-black uppercase tracking-widest text-white shadow-lg shadow-blue-600/20 hover:bg-blue-500 transition-all active:scale-95"
+                >
+                  Entendido
+                </button>
               </motion.div>
             </div>
           )}

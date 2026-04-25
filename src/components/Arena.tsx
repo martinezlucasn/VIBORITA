@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState, FormEvent } from 'react';
-import { User, PlayerSession, Food, Point, PowerUp, PowerUpType } from '../types';
-import { WORLD_W, WORLD_H, BASE_SPEED, CELL, ALL_SKINS, SEGMENT_DISTANCE, POWERUP_DURATION, POWERUP_SPAWN_CHANCE, MAGNET_RANGE } from '../constants';
+import { User, PlayerSession, Food, Point, ArenaItemEntity } from '../types';
+import { WORLD_W, WORLD_H, BASE_SPEED, CELL, ALL_SKINS, SEGMENT_DISTANCE } from '../constants';
+import { ARENA_ITEMS } from '../items';
 import { doc, setDoc, deleteDoc, onSnapshot, collection, query, where, serverTimestamp, addDoc, updateDoc, increment, orderBy, limit } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType, auth } from '../firebase';
 import { motion, AnimatePresence } from 'motion/react';
-import { Trophy, Coins, ArrowLeft, Zap, LogOut, MessageSquare, Send, Users, X } from 'lucide-react';
+import { Trophy, Coins, ArrowLeft, Zap, LogOut, MessageSquare, Send, Users, X, Target } from 'lucide-react';
 import { GoldPointIcon } from './Icons';
 import { soundManager } from '../lib/sounds';
 import { supabase } from '../lib/supabase';
@@ -26,8 +27,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
   const otherPlayersRef = useRef<Record<string, PlayerSession>>({});
   const interpolatedPlayersRef = useRef<Record<string, PlayerSession>>({});
   const foodsRef = useRef<Record<string, Food>>({});
-  const powerUpsRef = useRef<Record<string, PowerUp>>({});
-  const [activePowerUps, setActivePowerUps] = useState<Record<string, number>>({});
+  const itemsRef = useRef<Record<string, ArenaItemEntity>>({});
   const [isBoosting, setIsBoosting] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
@@ -44,11 +44,72 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
   const boostTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isTouchBoostingRef = useRef(false);
 
+  // Abilities state
+  const [isStopped, setIsStopped] = useState(false);
+  const [isAutopilot, setIsAutopilot] = useState(false);
+  const [isInvulnerable, setIsInvulnerable] = useState(false);
+  const [lastTeleportTime, setLastTeleportTime] = useState(0);
+  const [floatingTexts, setFloatingTexts] = useState<{ id: string; x: number; y: number; text: string; color: string; opacity: number }[]>([]);
+  const equippedAbilities = user.equippedAbilities || [];
+  const hasZoom = equippedAbilities.includes('zoom');
+  const hasMagnet = equippedAbilities.includes('magnet');
+  const hasTeleport = equippedAbilities.includes('teleport');
+  const hasStop = equippedAbilities.includes('stop');
+  const hasAutopilot = equippedAbilities.includes('autopilot');
+  
+  const handleTeleport = async () => {
+    if (!hasTeleport || user.coins < 250) return;
+    const now = Date.now();
+    if (now - lastTeleportTime < 180000) return; // 3 min
+
+    // Cost (to saldo)
+    try {
+      const userRef = doc(db, 'users', user.id);
+      await updateDoc(userRef, {
+        coins: increment(-250)
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${user.id}`);
+      return;
+    }
+
+    setLastTeleportTime(now);
+    
+    // Add floating text above the button
+    const textId = Math.random().toString(36).substr(2, 9);
+    setFloatingTexts(prev => [...prev, {
+      id: textId,
+      x: 20,
+      y: window.innerHeight - 100,
+      text: '-250 Puntos',
+      color: '#fbbf24',
+      opacity: 1
+    }]);
+
+    soundManager.play('star'); // Flash sound
+    
+    // Jump effect (invulnerability)
+    setIsInvulnerable(true);
+    setTimeout(() => setIsInvulnerable(false), 3000);
+    
+    // Find safe spot (far from other snakes)
+    const newPos = {
+      x: 100 + Math.random() * (WORLD_W - 200),
+      y: 100 + Math.random() * (WORLD_H - 200)
+    };
+    
+    playerRef.current.segments = playerRef.current.segments.map(() => ({ ...newPos }));
+    cameraRef.current.x = newPos.x;
+    cameraRef.current.y = newPos.y;
+    
+    // Add a flash effect on the snake (not implemented visually but invulnerability is there)
+  };
+
   const playerRef = useRef<PlayerSession>({
     id: user.id,
     userId: user.id,
     displayName: user.displayName,
-    segments: Array.from({ length: 8 + Math.floor(wager) }, (_, i) => ({ x: WORLD_W / 2 - i * SEGMENT_DISTANCE, y: WORLD_H / 2 })),
+    segments: Array.from({ length: 12 }, (_, i) => ({ x: WORLD_W / 2 - i * SEGMENT_DISTANCE, y: WORLD_H / 2 })),
     angle: 0,
     wager: wager,
     isAlive: true,
@@ -59,8 +120,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     skinEmoji: ALL_SKINS.find(s => s.id === user.equippedSkin)?.icon,
     hasAura: ALL_SKINS.find(s => s.id === user.equippedSkin)?.hasAura,
     auraType: ALL_SKINS.find(s => s.id === user.equippedSkin)?.auraType,
-    isBoosting: false,
-    activePowerUps: {}
+    isBoosting: false
   });
 
   const mouseRef = useRef<Point>({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
@@ -96,7 +156,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
           hasAura: playerRef.current.hasAura,
           auraType: playerRef.current.auraType,
           serverId: categoryServerId,
-          wager: 0
+          wager: 0,
+          mode: 'points'
         });
       });
 
@@ -117,11 +178,6 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
             lastUpdate: Date.now()
           };
         }
-      });
-
-      socket.on("server_death", ({ killerName }) => {
-        console.log("Server confirmed death!");
-        handleDeath(killerName);
       });
 
       socket.on("player_died", ({ id, killerName }) => {
@@ -148,12 +204,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     setDoc(playerDocRef, { ...playerRef.current, lastUpdate: Date.now() })
       .catch(e => handleFirestoreError(e, OperationType.WRITE, 'arenaPlayers/' + user.id));
 
-    // Initialize some local bots for the arena
-    const initialBots: PlayerSession[] = [];
-    for (let i = 0; i < 5; i++) {
-      initialBots.push(createBot(i, serverId));
-    }
-    botsRef.current = initialBots;
+    // No bots for Arena
+    botsRef.current = [];
 
     // Join message
     addDoc(collection(db, 'arenaChat'), {
@@ -205,26 +257,48 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         }
       }, (e) => handleFirestoreError(e, OperationType.LIST, 'arenaFood'));
 
-      // 3.1 Listen for powerups
-      const powerUpQuery = query(collection(db, 'arenaPowerUps'), where('serverId', '==', serverId));
-      const unsubPowerUps = onSnapshot(powerUpQuery, (snapshot) => {
-        const newPowerUps: Record<string, PowerUp> = {};
-        snapshot.forEach((doc) => {
-          newPowerUps[doc.id] = { id: doc.id, ...doc.data() } as PowerUp;
-        });
-        powerUpsRef.current = newPowerUps;
+    // 3.5 Listen for arena items
+    const itemsQuery = query(collection(db, 'arenaItems'), where('serverId', '==', serverId));
+    const unsubItems = onSnapshot(itemsQuery, (snapshot) => {
+      const newItems: Record<string, ArenaItemEntity> = {};
+      snapshot.forEach((doc) => {
+        newItems[doc.id] = { id: doc.id, ...doc.data() } as ArenaItemEntity;
+      });
+      itemsRef.current = newItems;
 
-        // Base powerup spawning logic: Keep at least 3 items if possible
-        if (snapshot.size < 3) {
-          const types: PowerUpType[] = ['magnet', 'shield', 'turbo', 'ghost'];
-          addDoc(collection(db, 'arenaPowerUps'), {
+      // Arena items spawning logic: Keep at least 8 items
+      if (snapshot.size < 8) {
+        const spawnCount = 8 - snapshot.size;
+        for (let i = 0; i < spawnCount; i++) {
+          const rand = Math.random();
+          let rarity: 'common' | 'rare' | 'epic' | 'legendary' = 'common';
+          if (rand > 0.98) rarity = 'legendary';
+          else if (rand > 0.90) rarity = 'epic';
+          else if (rand > 0.70) rarity = 'rare';
+
+          // 20% chance for ability fragments
+          const isFragmentChance = Math.random() < 0.20;
+          let candidates = ARENA_ITEMS.filter(item => 
+            item.rarity === rarity && 
+            (isFragmentChance ? item.id.startsWith('frag_') : !item.id.startsWith('frag_'))
+          );
+          
+          // Fallback if no fragments/items found for this rarity
+          if (candidates.length === 0) {
+            candidates = ARENA_ITEMS.filter(item => item.rarity === rarity);
+          }
+          
+          const chosenItem = candidates[Math.floor(Math.random() * candidates.length)];
+
+          addDoc(collection(db, 'arenaItems'), {
             x: Math.random() * WORLD_W,
             y: Math.random() * WORLD_H,
-            type: types[Math.floor(Math.random() * types.length)],
+            itemId: chosenItem.id,
             serverId
           }).catch(() => {});
         }
-      });
+      }
+    }, (e) => handleFirestoreError(e, OperationType.LIST, 'arenaItems'));
 
     // 4. Listen for chat
     const chatQuery = query(
@@ -300,18 +374,6 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       if (isAlive && playerRef.current.isAlive) {
         updatePlayer(dt);
         
-        // Update local bots
-        botsRef.current.forEach((bot, idx) => {
-          if (bot.isAlive) {
-            updateBot(bot, dt);
-          } else {
-            // Respawn after 2 seconds if dead
-            if (Date.now() - bot.lastUpdate > 2000) {
-              botsRef.current[idx] = createBot(idx, serverId!);
-            }
-          }
-        });
-
         checkCollisions(dt);
         
         // Smooth other players movement locally (Interpolation)
@@ -356,8 +418,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
               color1: playerRef.current.color1,
               color2: playerRef.current.color2,
               displayName: playerRef.current.displayName,
-              skinEmoji: playerRef.current.skinEmoji,
-              activePowerUps: playerRef.current.activePowerUps || {}
+              skinEmoji: playerRef.current.skinEmoji
             });
           }
           
@@ -412,7 +473,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       cancelAnimationFrame(animId);
       unsubPlayers();
       unsubFood();
-      unsubPowerUps();
+      unsubItems();
       unsubChat();
       unsubOnline();
       unsubKills();
@@ -445,17 +506,45 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
 
     playerRef.current.isBoosting = isBoosting && playerRef.current.wager > 0;
     
-    // PowerUp Effects
-    const nowTs = Date.now();
-    const hasMagnet = playerRef.current.activePowerUps?.magnet && playerRef.current.activePowerUps.magnet > nowTs;
-    const hasShield = playerRef.current.activePowerUps?.shield && playerRef.current.activePowerUps.shield > nowTs;
-    const hasTurbo = playerRef.current.activePowerUps?.turbo && playerRef.current.activePowerUps.turbo > nowTs;
-    const hasGhost = playerRef.current.activePowerUps?.ghost && playerRef.current.activePowerUps.ghost > nowTs;
-
     let speed = isBoosting && playerRef.current.wager > 0 ? BASE_SPEED * 2 : BASE_SPEED;
-    if (hasTurbo) speed *= 1.5;
     
-    if (isBoosting && playerRef.current.wager > 0 && !hasTurbo) {
+    // STOP ABILITY
+    if (isStopped) speed = 0;
+
+    // AUTOPILOT ABILITY
+    if (isAutopilot && !isStopped) {
+      let nearestTarget: {x: number, y: number} | null = null;
+      let minDist = 300;
+      
+      // Find nearest food
+      Object.values(foodsRef.current).forEach((f: any) => {
+        const d = Math.sqrt((head.x - f.x) ** 2 + (head.y - f.y) ** 2);
+        if (d < minDist) {
+          minDist = d;
+          nearestTarget = { x: f.x, y: f.y };
+        }
+      });
+
+      if (nearestTarget) {
+        const dxT = nearestTarget.x - head.x;
+        const dyT = nearestTarget.y - head.y;
+        const targetAngle = Math.atan2(dyT, dxT);
+        let diff = targetAngle - playerRef.current.angle;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        playerRef.current.angle += diff * Math.min(1, 5 * dt);
+      }
+
+      // Obstacle avoidance (walls)
+      const lookAhead = 100;
+      const futureX = head.x + Math.cos(playerRef.current.angle) * lookAhead;
+      const futureY = head.y + Math.sin(playerRef.current.angle) * lookAhead;
+      if (futureX < 50 || futureX > WORLD_W - 50 || futureY < 50 || futureY > WORLD_H - 50) {
+        playerRef.current.angle += Math.PI * 0.1; // Turn away
+      }
+    }
+
+    if (isBoosting && playerRef.current.wager > 0 && !isStopped) {
       playerRef.current.wager -= 0.2 * dt * 60; // Consume points over time
     }
     const newX = head.x + Math.cos(playerRef.current.angle) * speed * dt;
@@ -463,20 +552,28 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
 
     // Wall collision
     if (newX < 0 || newX > WORLD_W || newY < 0 || newY > WORLD_H) {
-      handleDeath();
-      return;
+      if (!isInvulnerable) {
+        handleDeath();
+        return;
+      }
     }
 
     const trail = playerRef.current.segments;
-    trail.unshift({ x: newX, y: newY });
+    if (speed > 0) {
+      trail.unshift({ x: newX, y: newY });
+    }
 
-    // Coherent growth: length grows linearly with wager
-    const pointsPerSegment = 5;
-    const targetSegments = 10 + Math.floor(playerRef.current.wager);
+    // New growth logic: starting size (12 base segments) + 1 segment every 7 points collected
+    const collectedPoints = Math.max(0, playerRef.current.wager - wager);
+    const pointsPerSegment = 5; // internal visual resolution
+    const baseSegments = 12;
+    const targetSegments = baseSegments + Math.floor(collectedPoints / 7);
     const maxTrailLen = targetSegments * pointsPerSegment;
 
-    while (trail.length > maxTrailLen) {
-      trail.pop();
+    if (speed > 0) {
+      while (trail.length > maxTrailLen) {
+        trail.pop();
+      }
     }
     playerRef.current.segments = trail;
 
@@ -485,8 +582,18 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     cameraRef.current.y += (head.y - cameraRef.current.y) * 0.1;
 
     // Dynamic zoom based on snake length to see ~80% of it
-    const targetZoom = Math.max(0.35, Math.min(1, 1200 / (maxTrailLen * 2 + 800)));
-    cameraRef.current.zoom += (targetZoom - cameraRef.current.zoom) * 0.02;
+    let targetZoomBase = Math.max(0.35, Math.min(1, 1200 / (maxTrailLen * 2 + 800)));
+    // ZOOM ABILITY: increase view width by 50%
+    if (hasZoom) targetZoomBase *= 0.65; 
+    
+    cameraRef.current.zoom += (targetZoomBase - cameraRef.current.zoom) * 0.02;
+
+    // Update floating texts
+    setFloatingTexts(prev => prev.map(ft => ({
+      ...ft,
+      y: ft.y - 1,
+      opacity: ft.opacity - 0.02
+    })).filter(ft => ft.opacity > 0));
   };
 
   const createBot = (index: number, sId?: string): PlayerSession => {
@@ -558,8 +665,11 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     const trail = bot.segments;
     trail.unshift({ x: newX, y: newY });
 
+    // Bot growth follows the 1/7 rule too
+    const collectedPoints = Math.max(0, bot.wager - 5); // Assuming 5 is bot starting wager
     const pointsPerSegment = 5;
-    const targetSegments = 12 + Math.floor(bot.wager);
+    const baseSegments = 12;
+    const targetSegments = baseSegments + Math.floor(collectedPoints / 7);
     const maxTrailLen = targetSegments * pointsPerSegment;
 
     while (trail.length > maxTrailLen) {
@@ -572,10 +682,25 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     const head = playerRef.current.segments[0];
     let scoreChanged = false;
 
-    // Food collision
+    // Food attraction and collision
     Object.entries(foodsRef.current).forEach(([id, food]: [string, Food]) => {
-      const d = Math.sqrt((head.x - food.x) ** 2 + (head.y - food.y) ** 2);
-      if (d < CELL) {
+      const dx = head.x - food.x;
+      const dy = head.y - food.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      
+      const attractionRadius = hasMagnet ? CELL * 3 : 0;
+      const collectionRadius = CELL;
+
+      // Magnet attraction effect
+      if (hasMagnet && d < attractionRadius && d > collectionRadius) {
+        const pullSpeed = BASE_SPEED * 2; // Moderate speed for flight effect
+        const angle = Math.atan2(dy, dx);
+        food.x += Math.cos(angle) * pullSpeed * dt;
+        food.y += Math.sin(angle) * pullSpeed * dt;
+      }
+
+      const currentD = Math.sqrt((head.x - food.x) ** 2 + (head.y - food.y) ** 2);
+      if (currentD < collectionRadius) {
         // Add to pending deletions instead of immediate delete
         if (!pendingFoodDeletions.current.includes(id)) {
           pendingFoodDeletions.current.push(id);
@@ -597,46 +722,30 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       setScore(Math.floor(playerRef.current.wager));
     }
 
-    // Magnet Effect: Pull food
-    const nowTs = Date.now();
-    if (playerRef.current.activePowerUps?.magnet && playerRef.current.activePowerUps.magnet > nowTs) {
-      Object.values(foodsRef.current).forEach(f => {
-        const food = f as Food;
-        const dx = head.x - food.x;
-        const dy = head.y - food.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < MAGNET_RANGE) {
-          food.x += (dx / dist) * 350 * dt;
-          food.y += (dy / dist) * 350 * dt;
-        }
-      });
-    }
-
-    // PowerUp collision
-    Object.entries(powerUpsRef.current).forEach(([id, puVal]) => {
-      const pu = puVal as PowerUp;
-      const d = Math.sqrt((head.x - pu.x) ** 2 + (head.y - pu.y) ** 2);
+    // Arena Items collision
+    Object.entries(itemsRef.current).forEach(([id, item]: [string, ArenaItemEntity]) => {
+      const d = Math.sqrt((head.x - item.x) ** 2 + (head.y - item.y) ** 2);
       if (d < CELL * 1.5) {
-        deleteDoc(doc(db, 'arenaPowerUps', id)).catch(() => {});
-        soundManager.play('powerup');
-        
-        const expiry = Date.now() + POWERUP_DURATION;
-        playerRef.current.activePowerUps = {
-          ...(playerRef.current.activePowerUps || {}),
-          [pu.type]: expiry
-        };
-        setActivePowerUps(prev => ({ ...prev, [pu.type]: expiry }));
+        // Collect item
+        deleteDoc(doc(db, 'arenaItems', id)).catch(() => {});
+        delete itemsRef.current[id];
+
+        // Update user inventory
+        const userRef = doc(db, 'users', user.id);
+        updateDoc(userRef, {
+          [`inventoryItems.${item.itemId}`]: increment(1)
+        }).catch(e => console.error("Error updating inventory:", e));
+
+        soundManager.play('plim');
       }
     });
 
     // Collision detection (Head vs Body)
-    const isPlayerInvulnerable = (playerRef.current.spawnTime && (Date.now() - playerRef.current.spawnTime < 1500)) || 
-                                 (playerRef.current.activePowerUps?.shield && playerRef.current.activePowerUps.shield > nowTs);
-    const isGhosted = playerRef.current.activePowerUps?.ghost && playerRef.current.activePowerUps.ghost > nowTs;
+    const isPlayerInvulnerable = (playerRef.current.spawnTime && (Date.now() - playerRef.current.spawnTime < 1500));
 
     // Other players collision (only head vs body)
     Object.values(otherPlayersRef.current).forEach((other: PlayerSession) => {
-      if (isPlayerInvulnerable || isGhosted) return;
+      if (isPlayerInvulnerable) return;
       const isOtherInvulnerable = other.spawnTime && (Date.now() - other.spawnTime < 1500);
       if (isOtherInvulnerable) return;
 
@@ -689,17 +798,6 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
                 victimName: bot.displayName,
                 timestamp: Date.now(),
               }).catch(() => {});
-
-              // Chance to spawn powerup on kill
-              if (Math.random() < POWERUP_SPAWN_CHANCE) {
-                const types: PowerUpType[] = ['magnet', 'shield', 'turbo', 'ghost'];
-                addDoc(collection(db, 'arenaPowerUps'), {
-                  x: botHead.x,
-                  y: botHead.y,
-                  type: types[Math.floor(Math.random() * types.length)],
-                  serverId
-                }).catch(() => {});
-              }
             }
             break;
           }
@@ -708,13 +806,14 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         if (hasCollided) {
           // Drop food along segments
           const segments = bot.segments;
-          const totalValue = Math.floor(bot.wager);
-          const valuePerSegment = Math.max(1, Math.floor(totalValue / segments.length));
+          const totalValue = segments.length;
+          const valuePerSegment = 1;
           
-          // Drop food every 3 segments to avoid too many writes
-          for (let i = 0; i < segments.length; i += 3) {
+          // Drop food every 5 segments to avoid too many writes
+          const dropFrequency = 5;
+          for (let i = 0; i < segments.length; i += dropFrequency) {
             const s = segments[i];
-            const val = valuePerSegment * 3;
+            const val = valuePerSegment * dropFrequency;
             if (val > 0) {
               addDoc(collection(db, 'arenaFood'), {
                 x: s.x,
@@ -730,8 +829,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       }
     });
 
-    // Respawn bots locally
-    if (botsRef.current.filter(b => b.isAlive).length < 5) {
+    // Respawn bots locally ONLY if NOT connected to a server
+    if (!serverId && botsRef.current.filter(b => b.isAlive).length < 5) {
       if (Math.random() > 0.99) {
         botsRef.current.push(createBot(botsRef.current.length));
       }
@@ -770,27 +869,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     await updateDoc(playerDocRef, { isAlive: false })
       .catch(e => handleFirestoreError(e, OperationType.UPDATE, 'arenaPlayers/' + user.id));
 
-    // Drop food (Exactly the points along segments)
-    const segments = playerRef.current.segments;
-    let totalValue = Math.floor(playerRef.current.wager);
-    const valuePerSegment = Math.max(1, Math.floor(totalValue / segments.length));
-
-    // Drop food every 3 segments to avoid too many writes
-    for (let i = 0; i < segments.length; i += 3) {
-      const seg = segments[i];
-      const val = valuePerSegment * 3;
-      
-      if (val > 0) {
-        addDoc(collection(db, 'arenaFood'), {
-          x: seg.x,
-          y: seg.y,
-          value: val,
-          type: 'dropped',
-          color: playerRef.current.color1,
-          serverId
-        }).catch(() => {});
-      }
-    }
+    // Player drops NOTHING in "jugar por puntos" / Arena Mode
+    // Removed food dropping logic here
 
     // Update user highScore
     const userRef = doc(db, 'users', user.id);
@@ -944,42 +1024,43 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       }
     });
 
-    // Powerups
-    ctx.shadowBlur = 10;
-    Object.values(powerUpsRef.current).forEach(puVal => {
-      const pu = puVal as any;
-      const time = Date.now() / 1000;
-      const pulse = Math.sin(time * 5) * 3;
-      const size = 15 + pulse;
-      
-      let color = '#fff';
-      let iconStr = '❓';
-      if (pu.type === 'magnet') { color = '#3b82f6'; iconStr = '🧲'; }
-      if (pu.type === 'shield') { color = '#22c55e'; iconStr = '🛡️'; }
-      if (pu.type === 'turbo') { color = '#f59e0b'; iconStr = '⚡'; }
-      if (pu.type === 'ghost') { color = '#a855f7'; iconStr = '👻'; }
+    // Draw Arena Items
+    Object.values(itemsRef.current).forEach((item: ArenaItemEntity) => {
+      const itemDef = ARENA_ITEMS.find(i => i.id === item.itemId);
+      if (!itemDef) return;
 
-      ctx.shadowColor = color;
-      ctx.fillStyle = color;
+      ctx.save();
+      ctx.translate(item.x, item.y);
+
+      // Draw semi-transparent box
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.lineWidth = 1;
+      const boxSize = 34;
       ctx.beginPath();
-      ctx.arc(pu.x, pu.y, size, 0, Math.PI * 2);
+      if (ctx.roundRect) {
+        ctx.roundRect(-boxSize / 2, -boxSize / 2, boxSize, boxSize, 8);
+      } else {
+        ctx.rect(-boxSize / 2, -boxSize / 2, boxSize, boxSize);
+      }
       ctx.fill();
-
-      // Outer ring
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(pu.x, pu.y, size + 4, 0, Math.PI * 2);
       ctx.stroke();
 
-      // Icon
-      ctx.shadowBlur = 0;
-      ctx.font = `${size}px Arial`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(iconStr, pu.x, pu.y);
+      if (itemDef.type === 'color') {
+        ctx.fillStyle = itemDef.value;
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = itemDef.value;
+        ctx.beginPath();
+        ctx.arc(0, 0, 10, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.font = '22px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(itemDef.value, 0, 0);
+      }
+      ctx.restore();
     });
-    ctx.shadowBlur = 0;
 
     // Draw Other Players
     Object.values(interpolatedPlayersRef.current).forEach((p: PlayerSession) => {
@@ -1078,15 +1159,10 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     if (trail.length < 2) return;
 
     const isInvulnerable = snake.spawnTime && (Date.now() - snake.spawnTime < 1500);
-    const nowTs = Date.now();
-    const hasShield = snake.activePowerUps?.shield && snake.activePowerUps.shield > nowTs;
-    const hasGhost = snake.activePowerUps?.ghost && snake.activePowerUps.ghost > nowTs;
-    const hasMagnet = snake.activePowerUps?.magnet && snake.activePowerUps.magnet > nowTs;
-    const hasTurbo = snake.activePowerUps?.turbo && snake.activePowerUps.turbo > nowTs;
 
     ctx.save();
-    if (isInvulnerable || hasGhost) {
-      ctx.globalAlpha = hasGhost ? 0.3 : 0.5;
+    if (isInvulnerable) {
+      ctx.globalAlpha = 0.5;
     }
 
     // Constant thickness (no growth with wager)
@@ -1095,7 +1171,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     const headRadius = 14; // Fixed radius for head
 
     // Aura (Visual Ability)
-    if (snake.hasAura || hasShield) {
+    if (snake.hasAura) {
       ctx.save();
       const time = Date.now() / 1000;
       const auraPulse = Math.sin(time * 5) * 2;
@@ -1104,11 +1180,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       // Layered glow
       const gradient = ctx.createRadialGradient(trail[0].x, trail[0].y, headRadius, trail[0].x, trail[0].y, auraRadius);
       
-      if (hasShield) {
-        gradient.addColorStop(0, 'rgba(34, 197, 94, 0.6)');
-        gradient.addColorStop(0.5, 'rgba(34, 197, 94, 0.3)');
-        gradient.addColorStop(1, 'rgba(34, 197, 94, 0)');
-      } else if (snake.auraType === 'fire') {
+      if (snake.auraType === 'fire') {
         gradient.addColorStop(0, 'rgba(255, 68, 0, 0.5)');
         gradient.addColorStop(0.5, 'rgba(255, 153, 0, 0.3)');
         gradient.addColorStop(1, 'rgba(255, 204, 0, 0)');
@@ -1116,6 +1188,10 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         gradient.addColorStop(0, 'rgba(0, 255, 255, 0.5)');
         gradient.addColorStop(0.5, 'rgba(150, 230, 255, 0.3)');
         gradient.addColorStop(1, 'rgba(200, 250, 255, 0)');
+      } else if (snake.auraType === 'lightning') {
+        gradient.addColorStop(0, 'rgba(255, 255, 0, 0.5)');
+        gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.3)');
+        gradient.addColorStop(1, 'rgba(255, 255, 200, 0)');
       }
       
       ctx.fillStyle = gradient;
@@ -1123,8 +1199,29 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       ctx.arc(trail[0].x, trail[0].y, auraRadius, 0, Math.PI * 2);
       ctx.fill();
       
-      // Particles
-      if (Math.random() > 0.6) {
+      // Particles / Bolts
+      if (snake.auraType === 'lightning') {
+        // Draw small lightning bolts
+        for (let b = 0; b < 3; b++) {
+          if (Math.random() > 0.4) {
+            ctx.strokeStyle = 'white';
+            ctx.lineWidth = 1.5;
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = 'yellow';
+            ctx.beginPath();
+            let bx = trail[0].x;
+            let by = trail[0].y;
+            ctx.moveTo(bx, by);
+            for (let s = 0; s < 3; s++) {
+              bx += (Math.random() - 0.5) * auraRadius * 0.8;
+              by += (Math.random() - 0.5) * auraRadius * 0.8;
+              ctx.lineTo(bx, by);
+            }
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+          }
+        }
+      } else if (Math.random() > 0.6) {
         if (snake.auraType === 'fire') {
           ctx.fillStyle = `rgba(255, ${Math.floor(Math.random() * 100 + 50)}, 0, 0.5)`;
         } else if (snake.auraType === 'ice') {
@@ -1140,8 +1237,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     }
 
     // Neon glow for the whole snake
-    ctx.shadowBlur = (snake.isBoosting || hasTurbo) ? 20 + Math.random() * 10 : 10;
-    ctx.shadowColor = (snake.isBoosting || hasTurbo) ? '#fff' : snake.color1;
+    ctx.shadowBlur = snake.isBoosting ? 20 + Math.random() * 10 : 10;
+    ctx.shadowColor = snake.isBoosting ? '#fff' : snake.color1;
 
     // Body segments (drawn from tail to head)
     for (let i = trail.length - 1; i >= pointsPerSegment; i -= pointsPerSegment) {
@@ -1150,13 +1247,13 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       // Constant thickness (no tapering)
       const r = baseRadius;
       
-      if (snake.isBoosting || hasTurbo) {
+      if (snake.isBoosting) {
         ctx.fillStyle = Math.random() > 0.5 ? '#fff' : (segmentIndex % 2 === 0 ? snake.color1 : snake.color2);
         // Aura particles
         if (Math.random() > 0.8) {
           ctx.save();
           ctx.shadowBlur = 5;
-          ctx.fillStyle = hasTurbo ? '#f59e0b' : '#fff';
+          ctx.fillStyle = '#fff';
           ctx.beginPath();
           ctx.arc(trail[i].x + (Math.random() - 0.5) * r * 3, trail[i].y + (Math.random() - 0.5) * r * 3, 2, 0, Math.PI * 2);
           ctx.fill();
@@ -1383,57 +1480,68 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         )}
       </AnimatePresence>
 
-      {/* Active Powerups UI */}
+      {/* Active Powerups UI removed */}
       <div className="pointer-events-none absolute left-4 top-40 flex flex-col gap-2">
-        <AnimatePresence>
-          {Object.entries(activePowerUps).map(([type, expiry]) => {
-            const now = Date.now();
-            if ((expiry as any) <= now) return null;
-            
-            const timeLeft = Math.ceil(((expiry as any) - now) / 1000);
-            const progress = (((expiry as any) - now) / POWERUP_DURATION) * 100;
-            
-            let color = 'bg-white';
-            let icon = <Zap size={16} />;
-            let label = type.toUpperCase();
+      </div>
 
-            if (type === 'magnet') { color = 'bg-blue-500'; label = 'IMÁN'; }
-            if (type === 'shield') { color = 'bg-green-500'; label = 'ESCUDO'; }
-            if (type === 'turbo') { color = 'bg-orange-500'; label = 'TURBO'; }
-            if (type === 'ghost') { color = 'bg-purple-500'; label = 'FANTASMA'; }
+      {/* Ability Buttons Section */}
+      <div className="absolute bottom-6 left-4 z-[70] flex flex-col gap-3 pointer-events-auto">
+        {hasTeleport && (
+          <div className="relative">
+            <button
+              onClick={handleTeleport}
+              disabled={Date.now() - lastTeleportTime < 180000 || user.coins < 250}
+              className={`flex h-12 w-12 items-center justify-center rounded-2xl border-2 transition-all active:scale-95 ${Date.now() - lastTeleportTime < 180000 ? 'border-gray-700 bg-gray-800/80 grayscale text-gray-500' : 'border-blue-500 bg-blue-500/20 text-blue-400 shadow-lg shadow-blue-500/20 hover:bg-blue-500/30'}`}
+            >
+              <Zap size={24} />
+              {Date.now() - lastTeleportTime < 180000 && (
+                <div className="absolute -top-2 -right-2 rounded-full bg-red-500 px-1.5 py-0.5 text-[8px] font-black text-white">
+                  {Math.ceil((180000 - (Date.now() - lastTeleportTime)) / 1000)}s
+                </div>
+              )}
+            </button>
+            <span className="mt-1 block text-center text-[8px] font-black uppercase text-white/50">Teleport (250)</span>
+          </div>
+        )}
 
-            return (
-              <motion.div
-                key={`active-pu-${type}`}
-                initial={{ x: -20, opacity: 0 }}
-                animate={{ x: 0, opacity: 1 }}
-                exit={{ x: -20, opacity: 0 }}
-                className="flex items-center gap-3 rounded-xl bg-black/60 p-2 pr-4 backdrop-blur-md border border-white/10"
-              >
-                <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${color} text-white shadow-lg`}>
-                  {type === 'magnet' && '🧲'}
-                  {type === 'shield' && '🛡️'}
-                  {type === 'turbo' && '⚡'}
-                  {type === 'ghost' && '👻'}
-                </div>
-                <div className="flex flex-col gap-0.5">
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="text-[10px] font-black text-white tracking-widest">{label}</span>
-                    <span className="text-[10px] font-bold text-gray-400">{timeLeft}s</span>
-                  </div>
-                  <div className="h-1 w-24 overflow-hidden rounded-full bg-white/10">
-                    <motion.div 
-                      className={`h-full ${color}`}
-                      initial={{ width: '100%' }}
-                      animate={{ width: `${progress}%` }}
-                      transition={{ duration: 0.1 }}
-                    />
-                  </div>
-                </div>
-              </motion.div>
-            );
-          })}
-        </AnimatePresence>
+        {hasStop && (
+          <div className="relative">
+            <button
+              onClick={() => setIsStopped(!isStopped)}
+              className={`flex h-12 w-12 items-center justify-center rounded-2xl border-2 transition-all active:scale-95 ${isStopped ? 'border-red-500 bg-red-500 text-white shadow-lg shadow-red-500/40' : 'border-gray-700 bg-gray-800/80 text-gray-400 hover:border-gray-500'}`}
+            >
+              <div className="h-4 w-4 bg-current rounded-sm" />
+            </button>
+            <span className="mt-1 block text-center text-[8px] font-black uppercase text-white/50">Parar</span>
+          </div>
+        )}
+
+        {hasAutopilot && (
+          <div className="relative">
+            <button
+              onClick={() => setIsAutopilot(!isAutopilot)}
+              className={`flex h-12 w-12 items-center justify-center rounded-2xl border-2 transition-all active:scale-95 ${isAutopilot ? 'border-green-500 bg-green-500/20 text-green-400 shadow-lg shadow-green-500/20' : 'border-gray-700 bg-gray-800/80 text-gray-400 hover:border-gray-500'}`}
+            >
+              <Target size={24} />
+            </button>
+            <span className="mt-1 block text-center text-[8px] font-black uppercase text-white/50">Auto</span>
+          </div>
+        )}
+      </div>
+
+      {/* Floating Texts */}
+      <div className="pointer-events-none fixed inset-0 z-[100]">
+        {floatingTexts.map(ft => (
+          <motion.div
+            key={ft.id}
+            initial={{ opacity: 1, y: ft.y }}
+            animate={{ opacity: 0, y: ft.y - 100 }}
+            className="absolute font-black text-xs uppercase tracking-widest whitespace-nowrap"
+            style={{ left: ft.x, color: ft.color }}
+          >
+            {ft.text}
+          </motion.div>
+        ))}
       </div>
 
       {/* Chat System */}

@@ -3,13 +3,15 @@ export interface Point {
   y: number;
 }
 
+export type Rarity = 'common' | 'rare' | 'epic' | 'legendary';
+
 export interface User {
   id: string;
   displayName: string;
   email: string;
   coins: number;
   monedas: number;
-  ownedSkins: string[];
+  ownedSkins: string[]; // Keep for backward compatibility, will store duplicates for quantity
   equippedSkin: string;
   highScore: number;
   highScoreMonedas: number;
@@ -19,6 +21,39 @@ export interface User {
   millonarioAccessUntil?: number;
   botKills?: number;
   insomniaCount?: number;
+  inventoryItems?: { [itemId: string]: number };
+  inventoryAbilities?: { [abilityId: string]: number };
+  equippedAbilities?: string[];
+  claimedPlatinumReward?: boolean;
+}
+
+export interface Ability {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  rarity: Rarity;
+  fragmentId: string;
+}
+
+export interface AbilityListing {
+  id: string;
+  sellerId: string;
+  sellerName: string;
+  abilityId: string;
+  price: number; // In "monedas"
+  timestamp: number;
+  status: 'active' | 'sold';
+}
+
+export interface SkinListing {
+  id: string;
+  sellerId: string;
+  sellerName: string;
+  skinId: string;
+  price: number; // In "monedas"
+  timestamp: number;
+  status: 'active' | 'sold';
 }
 
 export interface PlayerSession {
@@ -36,9 +71,8 @@ export interface PlayerSession {
   skinEmoji?: string;
   isBoosting?: boolean;
   hasAura?: boolean;
-  auraType?: 'fire' | 'ice';
+  auraType?: 'fire' | 'ice' | 'lightning';
   serverId?: string;
-  activePowerUps?: Record<string, number>; // type -> expiry timestamp
 }
 
 export interface Food {
@@ -51,14 +85,12 @@ export interface Food {
   serverId?: string;
 }
 
-export type PowerUpType = 'magnet' | 'shield' | 'turbo' | 'ghost';
-
-export interface PowerUp {
+export interface ArenaItemEntity {
   id: string;
   x: number;
   y: number;
-  type: PowerUpType;
-  serverId?: string;
+  itemId: string; // Ref to ARENA_ITEMS
+  serverId: string;
 }
 
 export interface Skin {
@@ -70,7 +102,7 @@ export interface Skin {
   price?: number;
   currency?: 'coins' | 'monedas';
   hasAura?: boolean;
-  auraType?: 'fire' | 'ice';
+  auraType?: 'fire' | 'ice' | 'lightning';
 }
 
 export interface ChatMessage {
