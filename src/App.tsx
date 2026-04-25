@@ -27,33 +27,30 @@ export default function App() {
   const [fbReady, setFbReady] = useState(false);
 
   useEffect(() => {
-    const initFB = async () => {
+    const checkFB = () => {
+      // @ts-ignore
+      if (window.FB_GAME_READY) {
+        setFbReady(true);
+        return true;
+      }
+      return false;
+    };
+
+    if (!checkFB()) {
+      const handleReady = () => {
+        setFbReady(true);
+      };
+      window.addEventListener('fb-instant-ready', handleReady);
+      
       const timeout = setTimeout(() => {
-        console.warn("FBInstant initialization timed out - continuing anyway");
         setFbReady(true);
       }, 5000);
 
-      if (typeof FBInstant !== 'undefined') {
-        try {
-          await FBInstant.initializeAsync();
-          FBInstant.setLoadingProgress(100);
-          await FBInstant.startGameAsync();
-          console.log("Juego iniciado en Facebook Instant Games");
-          clearTimeout(timeout);
-          setFbReady(true);
-        } catch (error) {
-          console.error("Error inicializando FBInstant:", error);
-          clearTimeout(timeout);
-          setFbReady(true);
-        }
-      } else {
-        // Not running in FB environment
+      return () => {
+        window.removeEventListener('fb-instant-ready', handleReady);
         clearTimeout(timeout);
-        setFbReady(true);
-      }
-    };
-
-    initFB();
+      };
+    }
   }, []);
 
   useEffect(() => {

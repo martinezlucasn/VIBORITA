@@ -11,6 +11,33 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <script src="https://connect.facebook.net/en_US/fbinstant.7.1.js"></script>
+    <script>
+      // 1. Iniciar el SDK
+      if (typeof FBInstant !== 'undefined') {
+        FBInstant.initializeAsync()
+          .then(function() {
+            console.log("SDK inicializado");
+            
+            // 2. Informar el progreso de carga
+            FBInstant.setLoadingProgress(100); 
+
+            // 3. Decirle a Facebook que arranque el juego
+            return FBInstant.startGameAsync();
+          })
+          .then(function() {
+            console.log("Juego iniciado");
+            window.FB_GAME_READY = true;
+            window.dispatchEvent(new Event('fb-instant-ready'));
+          })
+          .catch(function(error) {
+            console.error("Error iniciando el SDK:", error);
+            window.FB_GAME_READY = true;
+            window.dispatchEvent(new Event('fb-instant-ready'));
+          });
+      } else {
+        window.FB_GAME_READY = true;
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
