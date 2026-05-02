@@ -827,6 +827,27 @@ async function startServer() {
       });
     });
 
+    socket.on("player_died", (data) => {
+      const roomId = Array.from(socket.rooms).find(r => r !== socket.id);
+      if (!roomId) return;
+      
+      const room = rooms.get(roomId);
+      if (room) {
+        const player = room.players.get(socket.id);
+        if (player) {
+          player.isAlive = false;
+        }
+      }
+      
+      // Broadcast death to others
+      socket.to(roomId).emit("player_died", {
+        id: socket.id,
+        killerName: data.killerName || "Obstáculo",
+        wager: data.wager,
+        segments: data.segments
+      });
+    });
+
     socket.on("update_position", (data) => {
       const roomId = Array.from(socket.rooms).find(r => r !== socket.id);
       if (!roomId) return;

@@ -25,6 +25,19 @@ export interface User {
   inventoryAbilities?: { [abilityId: string]: number };
   equippedAbilities?: string[];
   claimedPlatinumReward?: boolean;
+  dailyRewardsCycle?: number;
+  lastDailyRewardClaim?: number;
+  // New Social/Profile properties
+  bio?: string;
+  profileTheme?: string;
+  profileBorder?: string;
+  unlockedThemes?: string[];
+  unlockedBorders?: string[];
+  trophies?: number;
+  avatarConfig?: {
+    style: string;
+    seed: string;
+  };
 }
 
 export interface Ability {
@@ -83,6 +96,8 @@ export interface Food {
   type: 'normal' | 'gold' | 'speed' | 'star' | 'dropped';
   color: string;
   serverId?: string;
+  expiresAt?: number;
+  isDeathLoot?: boolean;
 }
 
 export interface ArenaItemEntity {
@@ -112,6 +127,7 @@ export interface ChatMessage {
   text: string;
   timestamp: number;
   serverId?: string;
+  avatarConfig?: { style: string; seed: string; };
 }
 
 export interface KillEvent {
@@ -128,11 +144,22 @@ export interface Friendship {
   status: 'pending' | 'accepted';
   requesterId: string;
   gamesPlayed: number;
+  level: number;
+  exp: number;
+  lastInteractionTime?: number;
   stats: {
     [uid: string]: {
       wins: number;
     };
   };
+  timestamp: number;
+}
+
+export interface PrivateMessage {
+  id: string;
+  friendshipId: string;
+  senderId: string;
+  text: string;
   timestamp: number;
 }
 

@@ -4,7 +4,7 @@ import { ALL_SKINS } from '../constants';
 import { ALL_ABILITIES } from '../abilities';
 import { motion, AnimatePresence } from 'motion/react';
 import { supabase } from '../lib/supabase';
-import { Coins, Play, ShoppingBag, User as UserIcon, Trophy, ArrowLeft, Plus, Copy, ExternalLink, Check, X, Zap, Users, ShieldCheck, History, LogOut, Trash2, CreditCard, UserPlus, Search, Send, MessageSquare, Heart, Loader2, Award, Moon, Target, Skull, Sparkles, Settings, Volume2, VolumeX, Gamepad2, UserMinus } from 'lucide-react';
+import { Coins, Play, ShoppingBag, User as UserIcon, Trophy, ArrowLeft, Plus, Copy, ExternalLink, Check, X, Zap, Users, ShieldCheck, History, LogOut, Trash2, CreditCard, UserPlus, Palette, Search, Send, MessageSquare, Heart, Loader2, Award, Moon, Target, Skull, Sparkles, Settings, Volume2, VolumeX, Gamepad2, UserMinus, Instagram, Youtube, Facebook, Twitch, Calendar, Timer, Download } from 'lucide-react';
 import { GoldPointIcon, MonedasIcon } from './Icons';
 import AdminPanel from './AdminPanel';
 import { ARENA_ITEMS, SUCCESS_RATES, ArenaItem } from '../items';
@@ -13,6 +13,8 @@ import { db, handleFirestoreError, auth, OperationType } from '../firebase';
 import { signOut, deleteUser } from 'firebase/auth';
 import { soundManager } from '../lib/sounds';
 import { GoogleGenAI } from "@google/genai";
+import ExpandedFriendProfile from './Social/ExpandedFriendProfile';
+import ProfileCustomization from './Social/ProfileCustomization';
 
 // Initialize AI
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -24,14 +26,38 @@ const RARITY_ORDER: Record<string, number> = {
   common: 1
 };
 
+const APP_VERSION = '1.0.0';
+
+function compareVersions(v1: string, v2: string) {
+  const parts1 = v1.split('.').map(Number);
+  const parts2 = v2.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (parts1[i] > (parts2[i] || 0)) return 1;
+    if (parts1[i] < (parts2[i] || 0)) return -1;
+  }
+  return 0;
+}
+
+const DAILY_REWARDS = [
+  { day: 1, points: 500, fragments: 1 },
+  { day: 2, points: 750, fragments: 1 },
+  { day: 3, points: 1000, fragments: 1, proEntry: true },
+  { day: 4, points: 1000, fragments: 2, proEntry: true },
+  { day: 5, points: 1000, fragments: 2, millonarioEntry: true },
+  { day: 6, points: 1000, fragments: 2, millonarioEntry: true, monedas: 150 },
+  { day: 7, points: 1000, fragments: 2, proEntry: true, millonarioEntry: true, monedas: 250, randomAbility: true },
+];
+
 interface MenuProps {
   user: User;
   onStartGame: (wager: number) => void;
-  onStartTraining: (botCount: number) => void;
+  onStartTraining: (botCount: number, wager: number) => void;
   onStartWager: (wager: number, growthWager: number, category: string) => void;
+  initialRivalId?: string | null;
+  onRivalHandled?: () => void;
 }
 
-export default function Menu({ user, onStartGame, onStartTraining, onStartWager }: MenuProps) {
+export default function Menu({ user, onStartGame, onStartTraining, onStartWager, initialRivalId, onRivalHandled }: MenuProps) {
   const [view, setView] = useState<'main' | 'shop' | 'inventory' | 'ranking' | 'profile' | 'wallet' | 'fusion'>('main');
   const [showAdmin, setShowAdmin] = useState(false);
   const [wager, setWager] = useState(0);
@@ -72,18 +98,110 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
   const [isGeminiLoading, setIsGeminiLoading] = useState(false);
   const [purchaseConfirmation, setPurchaseConfirmation] = useState<{ skin: Skin; price: number } | null>(null);
   const [showArenaTicketsModal, setShowArenaTicketsModal] = useState(false);
+  const [showDailyRewards, setShowDailyRewards] = useState(false);
+  const [selectedDayForPreview, setSelectedDayForPreview] = useState<number | null>(null);
+  const [showProfileCustomization, setShowProfileCustomization] = useState(false);
+  const [showFriendProfile, setShowFriendProfile] = useState<Friendship | null>(null);
+  const [trainingWager, setTrainingWager] = useState(0);
+
+  useEffect(() => {
+    if (showFriendProfile) {
+      const friendId = showFriendProfile.uids.find(id => id !== user.id);
+      if (friendId) {
+        // Fetch fresh profile data when opening the profile to ensure medal counts and stats are up to date
+        getDoc(doc(db, 'users', friendId)).then(snap => {
+          if (snap.exists()) {
+            setFriendProfiles(prev => ({ ...prev, [friendId]: { id: friendId, ...snap.data() } as User }));
+          }
+        }).catch(err => console.error("Error fetching fresh friend profile:", err));
+      }
+    }
+  }, [showFriendProfile, user.id]);
+
+  useEffect(() => {
+    if (initialRivalId && friendships.length > 0) {
+      const friendship = friendships.find(f => f.friendId === initialRivalId);
+      if (friendship) {
+        setShowFriendProfile(friendship);
+        setView('profile');
+        if (onRivalHandled) onRivalHandled();
+      }
+    }
+  }, [initialRivalId, friendships, onRivalHandled]);
+
+  // Check daily reward eligibility
+  useEffect(() => {
+    const checkDailyReward = () => {
+      const now = Date.now();
+      const lastClaim = user.lastDailyRewardClaim || 0;
+      
+      const lastClaimDate = new Date(lastClaim).toDateString();
+      const nowDate = new Date(now).toDateString();
+      
+      if (lastClaimDate !== nowDate) {
+        setShowDailyRewards(true);
+        // Default preview to the day to be claimed
+        const currentCycle = user.dailyRewardsCycle || 0;
+        let nextDay = currentCycle + 1;
+        if (nextDay > 7) nextDay = 1;
+        setSelectedDayForPreview(nextDay);
+      } else {
+        // If already claimed today, preview the next day in the cycle
+        const currentCycle = user.dailyRewardsCycle || 0;
+        let nextDay = currentCycle + 1;
+        if (nextDay > 7) nextDay = 1;
+        setSelectedDayForPreview(nextDay);
+      }
+    };
+    checkDailyReward();
+  }, [user.lastDailyRewardClaim, user.dailyRewardsCycle]);
 
   // Fusion state
   const [isFusing, setIsFusing] = useState(false);
   const [fusingItem, setFusingItem] = useState<ArenaItem | null>(null);
   const [fusionResult, setFusionResult] = useState<{ success: boolean; skin?: Skin; ability?: Ability } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [musicEnabled, setMusicEnabled] = useState(soundManager.isMusicEnabled());
   const [sfxEnabled, setSfxEnabled] = useState(soundManager.isSFXEnabled());
   const [showControls, setShowControls] = useState(false);
   const [highQuality, setHighQuality] = useState(true);
-  const [musicVolume, setMusicVolume] = useState(soundManager.getMusicVolume());
   const [showTrainingModal, setShowTrainingModal] = useState(false);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<{ type: 'latest' | 'available' | 'error', msg: string } | null>(null);
+
+  const handleCheckUpdate = async () => {
+    setIsCheckingUpdate(true);
+    setUpdateStatus(null);
+    try {
+      const configSnap = await getDoc(doc(db, 'app_config', 'current'));
+      if (configSnap.exists()) {
+        const config = configSnap.data();
+        const latestVersion = config.version || '0.0.0';
+        
+        if (compareVersions(APP_VERSION, latestVersion) < 0) {
+          setUpdateStatus({ 
+            type: 'available', 
+            msg: `Nueva versión disponible: ${latestVersion}` 
+          });
+          // Also redirect if it's open
+          if (config.downloadUrl) {
+            window.open(config.downloadUrl, '_blank');
+          }
+        } else {
+          setUpdateStatus({ 
+            type: 'latest', 
+            msg: '¡Estás usando la última versión!' 
+          });
+        }
+      } else {
+        setUpdateStatus({ type: 'latest', msg: '¡Estás usando la última versión!' });
+      }
+    } catch (err) {
+      console.error('Update check error:', err);
+      setUpdateStatus({ type: 'error', msg: 'Error al buscar actualizaciones' });
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
 
   useEffect(() => {
     const acceptedFriends = friendships.filter(f => f.status === 'accepted').length;
@@ -111,6 +229,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
       { id: 'i_g', name: 'Insomnio de Oro', unlocked: insomnia >= 365 },
     ];
 
+    const allUnlocked = currentMedals.filter(m => m.unlocked).map(m => m.id);
     const newlyUnlocked = currentMedals.filter(m => m.unlocked && !unlockedMedalIds.includes(m.id));
     
     if (newlyUnlocked.length > 0) {
@@ -119,9 +238,18 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
         setMedalNotification(newlyUnlocked[0]);
         setTimeout(() => setMedalNotification(null), 5000);
       }
-      setUnlockedMedalIds(currentMedals.filter(m => m.unlocked).map(m => m.id));
+      setUnlockedMedalIds(allUnlocked);
     }
-  }, [friendships, user.botKills, user.insomniaCount, user.highScoreMonedas, unlockedMedalIds]);
+
+    // Persist the count to the user profile so friends can see it
+    // Check every time stats change to ensure DB is in sync
+    if (user.id && allUnlocked.length !== user.trophies) {
+      const userRef = doc(db, 'users', user.id);
+      updateDoc(userRef, {
+        trophies: allUnlocked.length
+      }).catch(e => console.error("Error updating trophies count:", e));
+    }
+  }, [friendships, user.botKills, user.insomniaCount, user.highScoreMonedas, unlockedMedalIds, user.id, user.trophies]);
 
   useEffect(() => {
     const checkInsomnia = async () => {
@@ -147,29 +275,6 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
       setShowUsernameModal(true);
     }
   }, [user.usernameSet]);
-
-  useEffect(() => {
-    // Attempt to initialize music on mount
-    soundManager.initMusic();
-
-    // Browser policy: Auto-unlock music on first interaction
-    const handleFirstInteraction = () => {
-      soundManager.initMusic();
-      document.removeEventListener('mousedown', handleFirstInteraction);
-      document.removeEventListener('touchstart', handleFirstInteraction);
-      document.removeEventListener('keydown', handleFirstInteraction);
-    };
-
-    document.addEventListener('mousedown', handleFirstInteraction);
-    document.addEventListener('touchstart', handleFirstInteraction);
-    document.addEventListener('keydown', handleFirstInteraction);
-
-    return () => {
-      document.removeEventListener('mousedown', handleFirstInteraction);
-      document.removeEventListener('touchstart', handleFirstInteraction);
-      document.removeEventListener('keydown', handleFirstInteraction);
-    };
-  }, []);
 
   // Gift fragments for tester
   useEffect(() => {
@@ -429,6 +534,80 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
     }
   };
 
+  const handleClaimDailyReward = async () => {
+    const userRef = doc(db, 'users', user.id);
+    
+    try {
+      await runTransaction(db, async (transaction) => {
+        const userDoc = await transaction.get(userRef);
+        if (!userDoc.exists()) throw new Error("Documento de usuario no existe");
+
+        const userData = userDoc.data();
+        const now = Date.now();
+        const lastClaim = userData.lastDailyRewardClaim || 0;
+        const currentCycle = userData.dailyRewardsCycle || 0;
+        
+        let nextDay = currentCycle + 1;
+        if (nextDay > 7) nextDay = 1;
+
+        // Strict calendar day check
+        const lastClaimDate = new Date(lastClaim).toDateString();
+        const nowDate = new Date(now).toDateString();
+        if (lastClaimDate === nowDate) throw new Error("Ya reclamaste hoy");
+
+        const reward = DAILY_REWARDS[nextDay - 1];
+        
+        // Prepare updates
+        const updates: any = {
+          coins: (userData.coins || 0) + reward.points,
+          monedas: (userData.monedas || 0) + (reward.monedas || 0),
+          dailyRewardsCycle: nextDay,
+          lastDailyRewardClaim: now
+        };
+
+        if (reward.proEntry) {
+          updates.proAccessUntil = now + (24 * 60 * 60 * 1000);
+        }
+        if (reward.millonarioEntry) {
+          updates.millonarioAccessUntil = now + (24 * 60 * 60 * 1000);
+        }
+        
+        // Random fragments
+        const inventoryItems = userData.inventoryItems || {};
+        const skinFragments = ARENA_ITEMS.filter(item => !item.id.startsWith('frag_'));
+        for (let i = 0; i < (reward.fragments || 0); i++) {
+          const randomFrag = skinFragments[Math.floor(Math.random() * skinFragments.length)];
+          if (randomFrag) {
+            inventoryItems[randomFrag.id] = (inventoryItems[randomFrag.id] || 0) + 1;
+          }
+        }
+        updates.inventoryItems = inventoryItems;
+
+        // Random ability
+        if (reward.randomAbility) {
+          const inventoryAbilities = userData.inventoryAbilities || {};
+          const randomAbility = ALL_ABILITIES[Math.floor(Math.random() * ALL_ABILITIES.length)];
+          if (randomAbility) {
+            inventoryAbilities[randomAbility.id] = (inventoryAbilities[randomAbility.id] || 0) + 1;
+            updates.inventoryAbilities = inventoryAbilities;
+          }
+        }
+
+        transaction.update(userRef, updates);
+      });
+
+      // UI Feedback - currentCycle will update via onSnapshot in App.tsx
+      setTicketMessage({ text: '¡Recompensa reclamada con éxito!', type: 'success' });
+      setTimeout(() => setTicketMessage(null), 4000);
+    } catch (e: any) {
+      console.error("Error claiming daily reward:", e);
+      if (e.message !== "Ya reclamaste hoy") {
+        setTicketMessage({ text: 'Error al reclamar recompensa', type: 'error' });
+        setTimeout(() => setTicketMessage(null), 3000);
+      }
+    }
+  };
+
   const getTimeRemaining = (expiry: number) => {
     const remaining = expiry - Date.now();
     if (remaining <= 0) return null;
@@ -538,6 +717,18 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
     setTimeout(() => setProfileMessage(null), 3000);
   };
 
+  const handleDeleteFriend = async (friendshipId: string) => {
+    try {
+      await deleteDoc(doc(db, 'friendships', friendshipId));
+      setProfileMessage({ text: 'Amigo eliminado', type: 'success' });
+      setShowFriendProfile(null);
+      setSelectedFriend(null);
+    } catch (e) {
+      handleFirestoreError(e, OperationType.DELETE, 'friendships/' + friendshipId);
+    }
+    setTimeout(() => setProfileMessage(null), 3000);
+  };
+
   const handleWithdrawListing = async (listing: SkinListing) => {
     try {
       const userRef = doc(db, 'users', user.id);
@@ -628,6 +819,14 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
       return;
     }
 
+    const isFirstTime = !user.usernameSet;
+    const cost = isFirstTime ? 0 : 10000;
+
+    if (!isFirstTime && user.coins < cost) {
+      setProfileMessage({ text: 'Saldo de puntos insuficiente (10,000 puntos requeridos)', type: 'error' });
+      return;
+    }
+
     setIsCheckingUsername(true);
     try {
       // Check if username is taken
@@ -641,18 +840,25 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
       }
 
       const userRef = doc(db, 'users', user.id);
-      await updateDoc(userRef, {
+      const updates: any = {
         displayName: tempUsername.trim(),
         usernameSet: true
-      });
+      };
 
-      // Sync with Supabase
+      if (!isFirstTime) {
+        updates.coins = increment(-cost);
+      }
+
+      await updateDoc(userRef, updates);
+
+      // Sync with Supabase (optional, but good for consistency)
       await supabase.from('profiles').update({
-        display_name: tempUsername.trim()
+        display_name: tempUsername.trim(),
+        coins: user.coins - cost
       }).eq('id', user.id);
 
       setShowUsernameModal(false);
-      setProfileMessage({ text: 'Nombre de usuario actualizado', type: 'success' });
+      setProfileMessage({ text: isFirstTime ? 'Nombre de usuario establecido' : 'Nombre de usuario actualizado', type: 'success' });
     } catch (e) {
       console.error('Error updating username:', e);
       setProfileMessage({ text: 'Error al actualizar nombre', type: 'error' });
@@ -966,6 +1172,14 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
 
   const handleUpdateUsername = async () => {
     if (!newUsername.trim() || newUsername === user.displayName) return;
+    
+    // Cost check: 10,000 points if not the first time
+    if (user.usernameSet && user.coins < 10000) {
+      setProfileMessage({ text: 'Necesitas 10.000 puntos para cambiar tu nombre', type: 'error' });
+      setTimeout(() => setProfileMessage(null), 3000);
+      return;
+    }
+
     setIsUpdatingProfile(true);
     try {
       // Check if username is taken (unique check)
@@ -978,15 +1192,26 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
       }
 
       const userRef = doc(db, 'users', user.id);
-      await updateDoc(userRef, { 
+      const updateData: any = { 
         displayName: newUsername.trim(),
         usernameSet: true 
-      });
+      };
+
+      // Deduct coins if not the first time
+      if (user.usernameSet) {
+        updateData.coins = user.coins - 10000;
+      }
+
+      await updateDoc(userRef, updateData);
       
       // Sync with Supabase
-      await supabase.from('profiles').update({ display_name: newUsername.trim() }).eq('id', user.id);
+      const supabaseData: any = { display_name: newUsername.trim() };
+      if (user.usernameSet) {
+        supabaseData.coins = user.coins - 10000;
+      }
+      await supabase.from('profiles').update(supabaseData).eq('id', user.id);
       
-      setProfileMessage({ text: 'Nombre de usuario actualizado', type: 'success' });
+      setProfileMessage({ text: user.usernameSet ? 'Nombre actualizado (-10.000 pts)' : 'Nombre establecido (Gratis)', type: 'success' });
     } catch (e) {
       setProfileMessage({ text: 'Error al actualizar', type: 'error' });
     } finally {
@@ -1271,16 +1496,33 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
         <div className="flex w-full max-w-md flex-col gap-4">
           <button 
             onClick={() => setShowSettings(true)}
-            className="absolute left-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-gray-800/80 text-gray-400 transition-all hover:bg-blue-600/20 hover:text-blue-400 border border-white/5 active:scale-95 shadow-lg backdrop-blur-sm z-50"
+            className="absolute right-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-gray-800/80 text-gray-400 transition-all hover:bg-blue-600/20 hover:text-blue-400 border border-white/5 active:scale-95 shadow-lg backdrop-blur-sm z-50"
             title="Ajustes"
           >
             <Settings size={20} />
           </button>
 
+          <button 
+            onClick={() => setShowDailyRewards(true)}
+            className="absolute left-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-gray-800/80 text-yellow-500 transition-all hover:bg-yellow-600/20 hover:text-yellow-400 border border-white/5 active:scale-95 shadow-lg backdrop-blur-sm z-50"
+            title="Recompensas Diarias"
+          >
+            <Calendar size={20} />
+            {(() => {
+                const lastClaim = user.lastDailyRewardClaim || 0;
+                const lastClaimDate = new Date(lastClaim).toDateString();
+                const nowDate = new Date().toDateString();
+                if (lastClaimDate !== nowDate) {
+                    return <div className="absolute -top-1 -right-1 h-3 w-3 bg-red-500 rounded-full border-2 border-gray-900 animate-pulse" />;
+                }
+                return null;
+            })()}
+          </button>
+
           {user.email === 'martinezlucasn@gmail.com' && (
             <button 
               onClick={() => setShowAdmin(true)}
-              className="absolute right-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-red-600/20 text-red-500 transition-all hover:bg-red-600/40 z-50"
+              className="absolute right-4 top-16 flex h-10 w-10 items-center justify-center rounded-full bg-red-600/20 text-red-500 transition-all hover:bg-red-600/40 z-50"
               title="Panel Maestro"
             >
               <ShieldCheck size={20} />
@@ -1305,7 +1547,14 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
           </div>
 
           <div className="flex flex-col items-center w-full">
-            <div className="bg-gray-800/80 px-4 py-1.5 rounded-t-xl border-t border-x border-white/10 backdrop-blur-md">
+            <div className="bg-gray-800/80 px-4 py-1.5 rounded-t-xl border-t border-x border-white/10 backdrop-blur-md flex items-center gap-2">
+              {user.avatarConfig && (
+                <img 
+                  src={`https://api.dicebear.com/7.x/${user.avatarConfig.style}/svg?seed=${user.avatarConfig.seed}`}
+                  className="h-4 w-4 rounded-full bg-blue-500/10"
+                  alt="Perfil"
+                />
+              )}
               <p className="text-[10px] font-black uppercase tracking-widest text-blue-400">
                 Bienvenido <span className="text-white">{user.displayName}</span>
               </p>
@@ -1424,6 +1673,21 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
               <span className="text-[10px] uppercase tracking-widest">Ranking</span>
             </button>
           </div>
+
+          <div className="mt-8 flex items-center justify-center gap-6 border-t border-white/5 pt-8">
+            <button className="text-gray-500 transition-all hover:scale-110 hover:text-pink-500" title="Instagram">
+              <Instagram size={24} />
+            </button>
+            <button className="text-gray-500 transition-all hover:scale-110 hover:text-blue-500" title="Facebook">
+              <Facebook size={24} />
+            </button>
+            <button className="text-gray-500 transition-all hover:scale-110 hover:text-red-500" title="YouTube">
+              <Youtube size={24} />
+            </button>
+            <button className="text-gray-500 transition-all hover:scale-110 hover:text-purple-500" title="Twitch">
+              <Twitch size={24} />
+            </button>
+          </div>
         </div>
       )}
 
@@ -1461,21 +1725,26 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
               <>
                 {/* Username Section */}
                 <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
-                  <label className="mb-2 block text-[10px] font-bold uppercase tracking-widest text-gray-400">Nombre de Usuario (Único)</label>
-                  <div className="flex gap-2">
+                  <div className="mb-2 flex items-center justify-between">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Nombre de Usuario</label>
+                    <span className="text-[8px] font-bold uppercase tracking-widest text-blue-400">
+                      {user.usernameSet ? 'Costo: 10.000 Puntos' : 'Primer cambio gratis'}
+                    </span>
+                  </div>
+                  <div className="space-y-4">
                     <input 
                       type="text"
                       value={newUsername}
                       onChange={(e) => setNewUsername(e.target.value)}
-                      className="flex-1 rounded-xl bg-black/30 px-4 py-3 text-sm font-bold text-white outline-none focus:ring-2 focus:ring-blue-500/50"
-                      placeholder="Nuevo nombre..."
+                      className="w-full rounded-2xl bg-black/40 px-6 py-4 text-sm font-black text-white outline-none ring-1 ring-white/10 focus:ring-2 focus:ring-blue-500/50 transition-all"
+                      placeholder="Escribe tu nuevo nombre..."
                     />
                     <button 
                       onClick={handleUpdateUsername}
-                      disabled={isUpdatingProfile || newUsername === user.displayName}
-                      className="rounded-xl bg-blue-600 px-4 font-bold text-white hover:bg-blue-500 disabled:opacity-50"
+                      disabled={isUpdatingProfile || !newUsername.trim() || newUsername === user.displayName}
+                      className="w-full rounded-2xl bg-blue-600 py-4 font-black uppercase tracking-widest text-white shadow-lg shadow-blue-600/20 hover:bg-blue-500 disabled:opacity-50 active:scale-95 transition-all"
                     >
-                      <Check size={20} />
+                      {isUpdatingProfile ? 'Actualizando...' : 'Confirmar Cambio'}
                     </button>
                   </div>
                 </div>
@@ -1573,21 +1842,51 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             ) : (
               <div className="space-y-6">
                 {/* My Username Section */}
-                <div className="rounded-2xl bg-blue-600/10 p-6 border border-blue-500/20 text-center">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-2">Tu Nombre de Usuario</p>
-                  <div className="flex items-center justify-center gap-3">
-                    <span className="text-4xl font-black tracking-tighter text-white uppercase italic">{user.displayName}</span>
-                    <button 
-                      onClick={() => {
-                        navigator.clipboard.writeText(user.displayName);
-                        setProfileMessage({ text: 'Nombre copiado', type: 'success' });
-                        setTimeout(() => setProfileMessage(null), 2000);
-                      }}
-                      className="rounded-lg bg-blue-600/20 p-2 text-blue-400 hover:bg-blue-600/40 transition-all"
-                    >
-                      <Copy size={18} />
-                    </button>
+                <div className={`rounded-2xl p-6 border text-center relative overflow-hidden ${user.profileBorder || 'border-blue-500/20'} bg-blue-600/10`}>
+                  {user.profileTheme && (
+                    <div className="absolute inset-0 opacity-20 pointer-events-none" style={{ background: user.profileTheme }} />
+                  )}
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-2 relative z-10">Tu Identidad</p>
+                  <div className="flex flex-col items-center justify-center gap-4 relative z-10">
+                    {user.avatarConfig ? (
+                      <div className="relative group/avatar">
+                        <img 
+                          src={`https://api.dicebear.com/7.x/${user.avatarConfig.style}/svg?seed=${user.avatarConfig.seed}`}
+                          className="h-24 w-24 rounded-full bg-blue-600/10 border-4 border-blue-500/30 p-1 shadow-[0_0_20px_rgba(37,99,235,0.2)] transition-transform group-hover/avatar:scale-110"
+                          alt="Avatar de Perfil"
+                        />
+                        <div className="absolute inset-0 rounded-full bg-blue-400 opacity-0 group-hover/avatar:opacity-10 blur-xl transition-opacity pointer-events-none" />
+                      </div>
+                    ) : (
+                      <div className="h-24 w-24 rounded-full bg-blue-600/20 flex items-center justify-center text-4xl font-black text-blue-400 border-4 border-blue-500/30 shadow-lg">
+                        {user.displayName?.[0].toUpperCase() || '?'}
+                      </div>
+                    )}
+                    <div className="flex items-center justify-center gap-3">
+                      <span className="text-4xl font-black tracking-tighter text-white uppercase italic">{user.displayName}</span>
+                      <button 
+                        onClick={() => {
+                          navigator.clipboard.writeText(user.displayName);
+                          setProfileMessage({ text: 'Nombre copiado', type: 'success' });
+                          setTimeout(() => setProfileMessage(null), 2000);
+                        }}
+                        className="rounded-lg bg-blue-600/20 p-2 text-blue-400 hover:bg-blue-600/40 transition-all"
+                      >
+                        <Copy size={18} />
+                      </button>
+                    </div>
                   </div>
+                  <button 
+                    onClick={() => setShowProfileCustomization(true)}
+                    className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-white hover:bg-blue-500 transition-all shadow-lg shadow-blue-600/20 relative z-10"
+                  >
+                    <Palette size={14} /> Personalizar Perfil
+                  </button>
+                  {user.bio && (
+                    <p className="mt-4 text-[10px] text-gray-400 italic font-medium px-4 line-clamp-2 relative z-10">
+                      "{user.bio}"
+                    </p>
+                  )}
                 </div>
 
                 {/* Add Friend Section */}
@@ -1620,11 +1919,19 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       {friendships.filter(f => f.status === 'pending' && f.requesterId !== user.id).map((f, idx) => {
                         const requester = friendProfiles[f.requesterId];
                         return (
-                          <div key={`pending-req-${f.id}-${idx}`} className="flex items-center justify-between rounded-xl bg-yellow-500/5 p-3 border border-yellow-500/20">
+                          <div key={`pending-req-list-${f.id || idx}`} className="flex items-center justify-between rounded-xl bg-yellow-500/5 p-3 border border-yellow-500/20">
                             <div className="flex items-center gap-3">
-                              <div className="h-8 w-8 rounded-full bg-yellow-500/20 flex items-center justify-center text-yellow-500 font-bold">
-                                {requester?.displayName?.[0].toUpperCase() || '?'}
-                              </div>
+                              {requester?.avatarConfig ? (
+                                <img 
+                                  src={`https://api.dicebear.com/7.x/${requester.avatarConfig.style}/svg?seed=${requester.avatarConfig.seed}`}
+                                  className="h-8 w-8 rounded-full"
+                                  alt={requester.displayName}
+                                />
+                              ) : (
+                                <div className="h-8 w-8 rounded-full bg-yellow-500/20 flex items-center justify-center text-yellow-500 font-bold">
+                                  {requester?.displayName?.[0].toUpperCase() || '?'}
+                                </div>
+                              )}
                               <div>
                                 <p className="text-sm font-bold text-white">{requester?.displayName || 'Cargando...'}</p>
                                 <p className="text-[8px] text-gray-500 uppercase tracking-widest">Pendiente</p>
@@ -1664,27 +1971,63 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       
                       return (
                         <div 
-                          key={`friend-accepted-${f.id}-${idx}`} 
-                          onClick={() => friend && setSelectedFriend(friend)}
-                          className="group flex items-center justify-between rounded-xl bg-white/5 p-3 border border-white/5 hover:bg-white/10 transition-all cursor-pointer"
+                          key={`friend-acc-v2-${f.id || idx}`} 
+                          onClick={() => {
+                            if (friend) {
+                              const friendshipRecord = friendships.find(f_rec => f_rec.uids.includes(friend.id));
+                              if (friendshipRecord) {
+                                setShowFriendProfile(friendshipRecord);
+                                setSelectedFriend(friend);
+                              }
+                            }
+                          }}
+                          className={`group flex items-center justify-between rounded-xl p-3 border hover:scale-[1.02] transition-all cursor-pointer relative overflow-hidden ${
+                            friend?.profileBorder || 'border-white/5 bg-white/5'
+                          } hover:bg-white/10`}
                         >
-                          <div className="flex items-center gap-3">
+                          {friend?.profileTheme && (
+                            <div className="absolute inset-0 opacity-10 pointer-events-none" style={{ background: friend.profileTheme }} />
+                          )}
+                          <div className="flex items-center gap-3 relative z-10">
                             <div className="relative">
-                              <div className="h-10 w-10 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 font-black text-xl">
-                                {friend?.displayName?.[0].toUpperCase() || '?'}
-                              </div>
+                              {friend?.avatarConfig ? (
+                                <img 
+                                  src={`https://api.dicebear.com/7.x/${friend.avatarConfig.style}/svg?seed=${friend.avatarConfig.seed}`}
+                                  className={`h-10 w-10 rounded-full bg-blue-500/10 border ${friend.profileBorder || 'border-transparent'}`}
+                                  alt={friend.displayName}
+                                />
+                              ) : (
+                                <div className={`h-10 w-10 rounded-full flex items-center justify-center font-black text-xl bg-blue-500/20 text-blue-400 ${friend?.profileBorder}`}>
+                                  {friend?.displayName?.[0].toUpperCase() || '?'}
+                                </div>
+                              )}
                               {isOnline && (
                                 <div className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-green-500 border-2 border-gray-900 shadow-[0_0_8px_rgba(34,197,94,0.6)]" />
                               )}
                             </div>
                             <div>
-                              <p className="text-sm font-black text-white">{friend?.displayName || 'Cargando...'}</p>
+                              <div className="flex items-center gap-2">
+                                <p className="text-sm font-black text-white">{friend?.displayName || 'Cargando...'}</p>
+                                {f.level > 1 && (
+                                  <span className="text-[8px] font-black bg-blue-600 text-white px-1.5 py-0.5 rounded italic">NV.{f.level}</span>
+                                )}
+                              </div>
                               <p className="text-[8px] text-gray-500 uppercase tracking-widest">
                                 {isOnline ? <span className="text-green-400">En Línea</span> : 'Desconectado'}
                               </p>
                             </div>
                           </div>
-                          <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity relative z-10">
+                            <button 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleInviteFriend(friendId, 50);
+                              }}
+                              className="rounded-lg bg-pink-600/20 p-2 text-pink-400 hover:bg-pink-600/40"
+                              title="Enviar Corazón"
+                            >
+                              <Heart size={16} />
+                            </button>
                             <button 
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -1694,16 +2037,6 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                               title="Invitar a Duelo"
                             >
                               <Zap size={16} />
-                            </button>
-                            <button 
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setFriendToDelete({ id: f.id, name: friend?.displayName || 'Usuario' });
-                              }}
-                              className="rounded-lg bg-red-600/20 p-2 text-red-400 hover:bg-red-600/40"
-                              title="Eliminar Amigo"
-                            >
-                              <Trash2 size={16} />
                             </button>
                           </div>
                         </div>
@@ -1751,7 +2084,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
 
                         return (
                           <div 
-                            key={`market-item-${listing.id}-${idx}`}
+                            key={`market-listing-global-${listing.id || idx}`}
                             className="flex items-center justify-between rounded-xl bg-white/5 p-3 border border-white/5 hover:border-blue-500/30 transition-all"
                           >
                             <div className="flex items-center gap-3">
@@ -1950,7 +2283,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
             
             <div className="max-h-[300px] space-y-3 overflow-y-auto pr-2 custom-scrollbar">
               {withdrawalHistory.map((w, idx) => (
-                <div key={`withdraw-hist-${w.id || idx}-${idx}`} className="rounded-xl bg-white/5 p-4 border border-white/5 hover:bg-white/10 transition-colors">
+                <div key={`withdraw-transaction-row-${w.id || idx}-${idx}`} className="rounded-xl bg-white/5 p-4 border border-white/5 hover:bg-white/10 transition-colors">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-[10px] font-bold text-gray-500">{new Date(w.timestamp).toLocaleDateString()}</span>
                     <span className={`rounded-full px-2 py-0.5 text-[8px] font-black uppercase tracking-widest ${w.status === 'completed' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'}`}>
@@ -2015,15 +2348,28 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                   <span className={`text-xl font-black ${idx === 0 ? 'text-yellow-500' : idx === 1 ? 'text-gray-300' : idx === 2 ? 'text-orange-500' : 'text-gray-500'}`}>
                     #{idx + 1}
                   </span>
+                  <div className="relative">
+                    {player.avatarConfig ? (
+                      <img 
+                        src={`https://api.dicebear.com/7.x/${player.avatarConfig.style}/svg?seed=${player.avatarConfig.seed}`}
+                        alt={player.displayName}
+                        className="h-10 w-10 rounded-xl bg-blue-500/10"
+                      />
+                    ) : (
+                      <div className="h-10 w-10 rounded-xl bg-blue-500/20 flex items-center justify-center font-black text-xl text-blue-400">
+                        {player.displayName[0].toUpperCase()}
+                      </div>
+                    )}
+                    {player.lastActive > currentTime - 60000 && (
+                      <span className="absolute -bottom-0.5 -right-0.5 h-2 w-2">
+                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"></span>
+                        <span className="relative inline-flex h-2 w-2 rounded-full bg-green-500"></span>
+                      </span>
+                    )}
+                  </div>
                   <div className="flex flex-col">
                     <div className="flex items-center gap-2">
                       <span className="font-bold">{player.displayName}</span>
-                      {player.lastActive > currentTime - 60000 && (
-                        <span className="relative flex h-2 w-2" title="En línea">
-                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"></span>
-                          <span className="relative inline-flex h-2 w-2 rounded-full bg-green-500"></span>
-                        </span>
-                      )}
                     </div>
                     {player.id === user.id && <span className="text-[8px] font-bold uppercase tracking-widest text-blue-400">Tú</span>}
                   </div>
@@ -3545,208 +3891,44 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
           </div>
         )}
 
-        {selectedFriend && (
-          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="w-full max-w-md rounded-3xl border border-white/10 bg-gray-900 p-8 shadow-2xl"
-            >
-              <div className="mb-6 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="h-12 w-12 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 font-black text-2xl">
-                    {selectedFriend.displayName?.[0].toUpperCase()}
-                  </div>
-                  <div>
-                    <h3 className="text-xl font-black italic tracking-tighter text-white uppercase">{selectedFriend.displayName}</h3>
-                    <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest font-mono">Amigo</p>
-                  </div>
-                </div>
-                <button onClick={() => setSelectedFriend(null)} className="text-gray-500 hover:text-white">
-                  <X size={24} />
-                </button>
-              </div>
+        {/* New Expanded Friend Profile Modal */}
+        <AnimatePresence>
+          {showFriendProfile && selectedFriend && (
+            <ExpandedFriendProfile 
+              friend={selectedFriend}
+              currentUser={user}
+              friendship={showFriendProfile}
+              listings={listings}
+              onBuySkin={handleBuyFromFriend}
+              onClose={() => {
+                setShowFriendProfile(null);
+                setSelectedFriend(null);
+              }}
+              onInvite={(wager) => {
+                handleInviteFriend(selectedFriend.id, wager);
+                setShowFriendProfile(null);
+                setSelectedFriend(null);
+              }}
+              onDeleteFriend={handleDeleteFriend}
+              onTransfer={(amount, currency) => handleTransfer(selectedFriend.id, amount, currency)}
+            />
+          )}
+        </AnimatePresence>
 
-              {(() => {
-                const friendship = friendships.find(f => f.uids.includes(selectedFriend.id));
-                if (!friendship) return null;
-
-                const gamesPlayed = friendship.gamesPlayed || 0;
-                const percentage = Math.min(100, (gamesPlayed / 2500) * 100);
-                const isTransferUnlocked = percentage >= 20;
-                const myWins = friendship.stats?.[user.id]?.wins || 0;
-                const friendWins = friendship.stats?.[selectedFriend.id]?.wins || 0;
-
-                return (
-                  <div className="space-y-6">
-                    {/* Friendship Progress */}
-                    <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Nivel de Amistad</span>
-                        <span className="text-sm font-black text-blue-400">{percentage.toFixed(1)}%</span>
-                      </div>
-                      <div className="h-3 w-full overflow-hidden rounded-full bg-gray-800">
-                        <motion.div 
-                          initial={{ width: 0 }}
-                          animate={{ width: `${percentage}%` }}
-                          className="h-full bg-gradient-to-r from-blue-600 to-blue-400"
-                        />
-                      </div>
-                      <p className="mt-2 text-[8px] text-center text-gray-500 uppercase tracking-widest">
-                        {gamesPlayed} / 2500 partidas jugadas juntos
-                      </p>
-                    </div>
-
-                    {/* Stats Grid */}
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="rounded-2xl bg-white/5 p-4 border border-white/5 text-center">
-                        <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1">Tus Victorias</p>
-                        <span className="text-2xl font-black text-white">{myWins}</span>
-                      </div>
-                      <div className="rounded-2xl bg-white/5 p-4 border border-white/5 text-center">
-                        <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1">Sus Victorias</p>
-                        <span className="text-2xl font-black text-white">{friendWins}</span>
-                      </div>
-                    </div>
-
-                    {/* Actions */}
-                    <div className="space-y-3">
-                      <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
-                        <div className="mb-2 flex items-center justify-between">
-                          <label className="text-[10px] font-bold uppercase tracking-widest text-gray-400 font-mono">Apuesta del Duelo</label>
-                          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-blue-600/10 border border-blue-500/20">
-                            <MonedasIcon size={10} />
-                            <span className="text-[9px] font-black text-blue-400 uppercase tracking-tight">{user.monedas.toLocaleString()} Saldo</span>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <div className="p-2 rounded-xl bg-purple-600/10 border border-purple-500/20">
-                            <MonedasIcon size={20} />
-                          </div>
-                          <input 
-                            type="number"
-                            value={duelWager}
-                            onChange={(e) => {
-                              const val = parseInt(e.target.value);
-                              if (isNaN(val)) setDuelWager(0);
-                              else setDuelWager(Math.min(user.monedas, Math.max(0, val)));
-                            }}
-                            className="flex-1 rounded-xl bg-black/30 px-4 py-2 text-lg font-black text-white outline-none focus:ring-2 focus:ring-purple-500/50"
-                            placeholder="0 para modo amistoso"
-                          />
-                        </div>
-                        {duelWager === 0 && (
-                          <p className="mt-2 text-[8px] text-center font-bold text-blue-400 uppercase tracking-widest animate-pulse">
-                            ¡Modo Amistoso Activado!
-                          </p>
-                        )}
-                      </div>
-
-                      <button 
-                        onClick={() => {
-                          handleInviteFriend(selectedFriend.id, duelWager);
-                          setSelectedFriend(null);
-                        }}
-                        className="flex w-full items-center justify-center gap-3 rounded-xl bg-purple-600 py-4 font-black uppercase tracking-widest text-white hover:bg-purple-500 shadow-lg shadow-purple-600/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
-                      >
-                        <Zap size={18} className="fill-white" /> Invitar a Duelo
-                      </button>
-
-                      <button 
-                        onClick={() => {
-                          if (!isTransferUnlocked) {
-                            setProfileMessage({ text: 'Necesitas 20% de amistad para transferir', type: 'error' });
-                            setTimeout(() => setProfileMessage(null), 3000);
-                            return;
-                          }
-                          setShowTransferModal(true);
-                        }}
-                        className={`flex flex-col w-full items-center justify-center gap-0.5 rounded-xl py-3 font-black uppercase tracking-widest text-white transition-all ${isTransferUnlocked ? 'bg-blue-600 hover:bg-blue-500' : 'bg-gray-800 text-gray-500 cursor-not-allowed'}`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <Send size={18} /> Transferir Fondos
-                          {!isTransferUnlocked && <ShieldCheck size={14} className="ml-1" />}
-                        </div>
-                        {!isTransferUnlocked && (
-                          <span className="text-[8px] font-normal lowercase opacity-40">
-                            disponible al alcanzar el 20% de amistad
-                          </span>
-                        )}
-                      </button>
-
-                      <button 
-                        onClick={() => setFriendToDelete({ id: friendship.id, name: selectedFriend.displayName })}
-                        className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-red-900/20 py-3 text-[10px] font-black uppercase tracking-widest text-red-500 hover:bg-red-900/40 transition-all border border-red-500/10"
-                      >
-                        <UserMinus size={14} /> Eliminar Amigo
-                      </button>
-                    </div>
-
-                    {/* Friend's Marketplace */}
-                    <div className="space-y-4">
-                      <div className="flex items-center gap-2 px-1">
-                        <ShoppingBag size={14} className="text-blue-400" />
-                        <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-gray-500">Mercado de {selectedFriend.displayName}</h4>
-                      </div>
-                      
-                      <div className="max-h-48 overflow-y-auto pr-2 custom-scrollbar">
-                        {(() => {
-                          const friendListings = listings
-                            .filter(l => l.sellerId === selectedFriend.id && l.status === 'active')
-                            .sort((a, b) => b.timestamp - a.timestamp);
-                          
-                          if (friendListings.length === 0) {
-                            return (
-                              <div className="flex items-center justify-center py-8 rounded-2xl bg-white/5 border border-white/5 border-dashed">
-                                <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest text-center px-4">
-                                  Este amigo no tiene skins publicadas actualmente
-                                </p>
-                              </div>
-                            );
-                          }
-
-                          return (
-                            <div className="space-y-2">
-                              {friendListings.map((listing) => {
-                                const skin = ALL_SKINS.find(s => s.id === listing.skinId);
-                                if (!skin) return null;
-                                return (
-                                  <div 
-                                    key={`friend-listing-${listing.id}`}
-                                    className="flex items-center justify-between rounded-2xl bg-black/40 border border-white/10 p-3 hover:border-blue-500/30 transition-colors"
-                                  >
-                                    <div className="flex items-center gap-3">
-                                      <span className="text-2xl">{skin.icon}</span>
-                                      <div>
-                                        <p className="text-[10px] font-black text-white uppercase leading-none">{skin.name}</p>
-                                        <div className="flex items-center gap-1 mt-1">
-                                          <MonedasIcon size={10} />
-                                          <span className="text-xs font-black text-blue-400">{listing.price.toLocaleString()}</span>
-                                        </div>
-                                      </div>
-                                    </div>
-                                    <button 
-                                      onClick={() => handleBuyFromFriend(listing)}
-                                      disabled={user.monedas < listing.price}
-                                      className="rounded-xl bg-blue-600 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-white hover:bg-blue-500 disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-blue-600/20"
-                                    >
-                                      Comprar
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          );
-                        })()}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-            </motion.div>
-          </div>
-        )}
+        {/* New Profile Customization Modal */}
+        <AnimatePresence>
+          {showProfileCustomization && (
+            <ProfileCustomization 
+              user={user}
+              onClose={() => setShowProfileCustomization(false)}
+              onUpdate={() => {
+                // The main App.tsx should detect changes via onSnapshot, 
+                // but we can trigger a manual refresh if needed.
+                setShowProfileCustomization(false);
+              }}
+            />
+          )}
+        </AnimatePresence>
 
         {/* List Skin Modal */}
         {showListModal && (
@@ -3896,19 +4078,25 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 initial={{ x: 100, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
                 exit={{ x: 100, opacity: 0 }}
-                className="w-80 rounded-2xl bg-gray-900/95 p-4 border border-purple-500/30 shadow-2xl backdrop-blur-xl pointer-events-auto"
+                className={`w-80 rounded-2xl bg-gray-900/95 p-4 border shadow-2xl backdrop-blur-xl pointer-events-auto ${
+                  notif.type === 'rematch_invite' ? 'border-yellow-500/50 shadow-yellow-500/10' : 'border-purple-500/30'
+                }`}
               >
                 <div className="flex items-start gap-3">
-                  <div className="rounded-full bg-purple-500/20 p-2">
-                    <Zap className="text-purple-400" size={20} />
+                  <div className={`rounded-full p-2 ${
+                    notif.type === 'rematch_invite' ? 'bg-yellow-500/20' : 'bg-purple-500/20'
+                  }`}>
+                    <Zap className={notif.type === 'rematch_invite' ? 'text-yellow-400' : 'text-purple-400'} size={20} />
                   </div>
                   <div className="flex-1">
-                    <h4 className="text-sm font-black text-white uppercase italic tracking-tighter">¡Desafío Recibido!</h4>
+                    <h4 className="text-sm font-black text-white uppercase italic tracking-tighter">
+                      {notif.type === 'rematch_invite' ? '¡Revancha Solicitada!' : '¡Desafío Recibido!'}
+                    </h4>
                     <p className="text-xs text-gray-400 mt-1">
-                      <span className="font-bold text-white">{notif.fromName}</span> te invita a un {notif.wager > 0 ? (
-                        <>duelo por <span className="font-bold text-yellow-500">{notif.wager} monedas</span></>
+                      <span className="font-bold text-white">{notif.fromName}</span> te invita a una {notif.type === 'rematch_invite' ? 'revancha' : 'duelo'} {notif.wager > 0 ? (
+                        <>por <span className={`font-bold ${notif.type === 'rematch_invite' ? 'text-yellow-400' : 'text-yellow-500'}`}>{notif.wager} monedas</span></>
                       ) : (
-                        <span className="font-bold text-blue-400">Duelo Amistoso</span>
+                        <span className="font-bold text-blue-400">Amistoso</span>
                       )}.
                     </p>
                     <div className="mt-4 flex gap-2">
@@ -3921,12 +4109,18 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                           }
                           try {
                             await updateDoc(doc(db, 'notifications', notif.id), { status: 'accepted' });
-                            onStartWager(notif.wager || 0, 10, `private_${notif.roomId}`);
+                            if (notif.type === 'rematch_invite') {
+                              onStartWager(notif.wager, notif.growthWager || 10, notif.category);
+                            } else {
+                              onStartWager(notif.wager || 0, 10, `private_${notif.roomId}`);
+                            }
                           } catch (e) {
                             console.error('Error accepting invite:', e);
                           }
                         }}
-                        className="flex-1 rounded-lg bg-purple-600 py-2 text-[10px] font-black uppercase tracking-widest text-white hover:bg-purple-500"
+                        className={`flex-1 rounded-lg py-2 text-[10px] font-black uppercase tracking-widest text-white transition-colors ${
+                          notif.type === 'rematch_invite' ? 'bg-yellow-600 hover:bg-yellow-500' : 'bg-purple-600 hover:bg-purple-500'
+                        }`}
                       >
                         Aceptar
                       </button>
@@ -3950,6 +4144,166 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
           </AnimatePresence>
         </div>
 
+        {/* Daily Rewards Modal */}
+        <AnimatePresence>
+          {showDailyRewards && (
+            <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
+              <motion.div
+                initial={{ scale: 0.8, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.8, opacity: 0, y: 20 }}
+                className="w-full max-w-lg rounded-[3rem] border border-blue-500/30 bg-gray-900 shadow-3xl overflow-hidden"
+              >
+                <div className="relative h-32 bg-gradient-to-br from-blue-600 to-indigo-900 p-8 flex items-center justify-between border-b border-white/10">
+                  <div className="z-10">
+                    <h2 className="text-3xl font-black italic tracking-tighter text-white uppercase leading-none">Recompensas Diarias</h2>
+                    <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.2em] text-blue-200">Reclama tu premio cada 24 horas</p>
+                  </div>
+                  <Calendar size={48} className="absolute right-8 text-white/10 z-0" />
+                  <button onClick={() => setShowDailyRewards(false)} className="z-10 text-white/50 hover:text-white transition-colors">
+                    <X size={24} />
+                  </button>
+                </div>
+
+                <div className="p-8">
+                  <div className="grid grid-cols-4 gap-3 mb-8">
+                    {DAILY_REWARDS.map((reward, idx) => {
+                      const dayNumber = idx + 1;
+                      const currentCycle = user.dailyRewardsCycle || 0;
+                      const lastClaimDate = new Date(user.lastDailyRewardClaim || 0).toDateString();
+                      const nowDate = new Date().toDateString();
+                      const isClaimedToday = lastClaimDate === nowDate;
+                      
+                      const isAlreadyClaimed = dayNumber <= currentCycle && (isClaimedToday || dayNumber < currentCycle);
+                      const isNextToClaim = !isClaimedToday && (dayNumber === (currentCycle % 7) + 1);
+                      const isSelected = (selectedDayForPreview || (isNextToClaim ? dayNumber : (currentCycle % 7) + 1)) === dayNumber;
+                      
+                      return (
+                        <button 
+                          key={`reward-day-card-${dayNumber}`}
+                          onClick={() => setSelectedDayForPreview(dayNumber)}
+                          className={`relative flex flex-col items-center justify-center rounded-2xl p-4 transition-all border ${
+                            isAlreadyClaimed ? 'bg-green-500/10 border-green-500/40 opacity-40 grayscale-[0.8]' :
+                            isNextToClaim ? 'bg-blue-600 shadow-xl shadow-blue-600/30 border-blue-400' :
+                            isSelected ? 'bg-gray-800 border-blue-500/50 scale-105 z-10' :
+                            'bg-gray-800 border-white/5 opacity-80 hover:opacity-100 hover:border-white/20'
+                          } ${dayNumber === 7 ? 'col-span-2' : ''}`}
+                        >
+                          <span className={`text-[10px] font-black uppercase mb-2 ${isNextToClaim ? 'text-white' : isSelected ? 'text-blue-400' : 'text-gray-500'}`}>Día {dayNumber}</span>
+                          <div className="text-xl mb-1 filter drop-shadow-md">
+                            {dayNumber === 7 ? '🎁' : dayNumber % 3 === 0 ? '🏆' : '💎'}
+                          </div>
+                          {isAlreadyClaimed && <Check size={16} className="absolute top-2 right-2 text-green-500" strokeWidth={3} />}
+                          {isNextToClaim && !isAlreadyClaimed && <div className="absolute -top-1 -right-1 h-3 w-3 bg-red-500 rounded-full border-2 border-gray-900 animate-pulse" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {(() => {
+                    const currentCycle = user.dailyRewardsCycle || 0;
+                    const lastClaim = user.lastDailyRewardClaim || 0;
+                    const lastClaimDate = new Date(lastClaim).toDateString();
+                    const nowDate = new Date().toDateString();
+                    const isClaimedToday = lastClaimDate === nowDate;
+                    
+                    let nextToClaimDay = currentCycle + 1;
+                    if (nextToClaimDay > 7) nextToClaimDay = 1;
+
+                    // If user is looking at a day that is NOT the next claimable day
+                    const previewDay = selectedDayForPreview || nextToClaimDay;
+                    const reward = DAILY_REWARDS[previewDay - 1];
+                    const isPreviewingClaimable = previewDay === nextToClaimDay && !isClaimedToday;
+                    const isPreviewingClaimed = (previewDay <= currentCycle && isClaimedToday) || (previewDay < currentCycle);
+
+                    return (
+                        <div className="space-y-6">
+                            <div className={`rounded-3xl p-6 border transition-all ${
+                                isPreviewingClaimable ? 'bg-blue-600/10 border-blue-500/30' : 
+                                isPreviewingClaimed ? 'bg-green-500/5 border-green-500/20' : 
+                                'bg-gray-800/50 border-white/10'
+                            }`}>
+                                <div className="flex items-center justify-between mb-4">
+                                    <h4 className={`text-[10px] font-black uppercase tracking-[0.2em] ${
+                                        isPreviewingClaimable ? 'text-blue-400' : 
+                                        isPreviewingClaimed ? 'text-green-500' : 
+                                        'text-gray-500'
+                                    }`}>
+                                        {isPreviewingClaimed ? `Recompensa Día ${previewDay} (Reclamada)` : 
+                                         isPreviewingClaimable ? `Tu Recompensa del Día ${previewDay}` : 
+                                         `Previa Recompensa Día ${previewDay}`}
+                                    </h4>
+                                    {isPreviewingClaimed && <span className="text-[10px] font-bold text-green-500 uppercase">Obtenido</span>}
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="flex items-center gap-3 bg-black/30 p-3 rounded-2xl border border-white/5">
+                                        <GoldPointIcon size={20} />
+                                        <span className="text-sm font-black text-white">+{reward.points} Puntos</span>
+                                    </div>
+                                    {reward.fragments > 0 && (
+                                        <div className="flex items-center gap-3 bg-black/30 p-3 rounded-2xl border border-white/5">
+                                            <Sparkles size={16} className="text-purple-400" />
+                                            <span className="text-sm font-black text-white">+{reward.fragments} Fragmentos</span>
+                                        </div>
+                                    )}
+                                    {reward.proEntry && (
+                                        <div className="flex items-center gap-3 bg-black/30 p-3 rounded-2xl border border-white/5">
+                                            <ShieldCheck size={16} className="text-blue-400" />
+                                            <span className="text-[10px] font-black text-white uppercase">Entrada PRO</span>
+                                        </div>
+                                    )}
+                                    {reward.millonarioEntry && (
+                                        <div className="flex items-center gap-3 bg-black/30 p-3 rounded-2xl border border-white/5">
+                                            <Trophy size={16} className="text-yellow-500" />
+                                            <span className="text-[10px] font-black text-white uppercase">Entrada Millonario</span>
+                                        </div>
+                                    )}
+                                    {reward.monedas && (
+                                        <div className="flex items-center gap-3 bg-black/30 p-3 rounded-2xl border border-white/5">
+                                            <MonedasIcon size={16} />
+                                            <span className="text-sm font-black text-white">+{reward.monedas} Monedas</span>
+                                        </div>
+                                    )}
+                                    {reward.randomAbility && (
+                                        <div className="flex items-center gap-3 bg-black/30 p-3 rounded-2xl border border-white/5">
+                                            <Zap size={16} className="text-yellow-400" />
+                                            <span className="text-[10px] font-black text-white uppercase">Habilidad Aleatoria</span>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {isPreviewingClaimable ? (
+                                <button 
+                                    onClick={handleClaimDailyReward}
+                                    className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-5 rounded-2xl text-lg uppercase tracking-widest transition-all shadow-xl shadow-blue-600/30 active:scale-[0.98]"
+                                >
+                                    Reclamar Premio
+                                </button>
+                            ) : isClaimedToday && previewDay === currentCycle ? (
+                                <div className="bg-gray-800/80 rounded-3xl p-6 text-center border border-white/5">
+                                    <div className="flex items-center justify-center gap-2 mb-2">
+                                        <Check size={20} className="text-green-500" />
+                                        <p className="text-sm font-bold text-gray-400 uppercase tracking-widest text-green-500/80">¡Premio de hoy reclamado!</p>
+                                    </div>
+                                    <p className="text-[10px] text-gray-500 uppercase tracking-widest">Premio de hoy reclamado. Vuelve mañana para reclamar tu nuevo premio.</p>
+                                    <p className="text-[10px] text-blue-400 mt-2 font-black uppercase tracking-[0.2em] animate-pulse">Día {nextToClaimDay} disponible mañana</p>
+                                </div>
+                            ) : (
+                                <div className="bg-gray-800/40 rounded-3xl p-4 text-center border border-white/5">
+                                    <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em]">Incentivo: Llega al Día {previewDay} para este premio</p>
+                                </div>
+                            )}
+                        </div>
+                    );
+                  })()}
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
         {/* Username Modal */}
         <AnimatePresence>
           {showUsernameModal && (
@@ -3963,13 +4317,27 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                   <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-blue-600/20 text-blue-400">
                     <UserIcon size={40} />
                   </div>
-                  <h2 className="text-3xl font-black italic tracking-tighter text-white uppercase">Tu Identidad Única</h2>
-                  <p className="mt-2 text-xs font-bold uppercase tracking-widest text-gray-500">Confirma tu nombre de usuario para continuar</p>
+                  <h2 className="text-3xl font-black italic tracking-tighter text-white uppercase">Tu Identidad</h2>
+                  <p className="mt-2 text-xs font-bold uppercase tracking-widest text-gray-500">
+                    {user.usernameSet ? 'Cambiar tu nombre de usuario' : 'Confirma tu nombre de usuario para continuar'}
+                  </p>
                 </div>
 
                 <div className="space-y-6">
                   <div className="rounded-3xl bg-white/5 p-6 border border-white/5">
-                    <label className="mb-3 block text-[10px] font-bold uppercase tracking-widest text-blue-400">Nombre de Usuario</label>
+                    <div className="mb-3 flex items-center justify-between">
+                      <label className="text-[10px] font-bold uppercase tracking-widest text-blue-400">Nombre de Usuario</label>
+                      <div className="flex items-center gap-1.5 rounded-full bg-black/40 px-3 py-1 border border-white/10">
+                        {user.usernameSet ? (
+                          <>
+                            <GoldPointIcon size={12} />
+                            <span className="text-xs font-black text-white">10,000</span>
+                          </>
+                        ) : (
+                          <span className="text-[10px] font-black text-green-400 uppercase">¡Gratis!</span>
+                        )}
+                      </div>
+                    </div>
                     <input 
                       type="text"
                       value={tempUsername}
@@ -3977,25 +4345,42 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       className="w-full rounded-2xl bg-black/40 px-6 py-4 text-xl font-black text-white outline-none ring-2 ring-white/10 focus:ring-blue-500"
                       placeholder="Ej: ElPro_44"
                     />
-                    <p className="mt-3 text-[10px] text-gray-500 italic">
-                      * Este nombre será visible para tus amigos y en el ranking. Debe ser único.
-                    </p>
+                    <div className="mt-4 flex flex-col gap-2">
+                      <p className="text-[10px] text-gray-500 italic">
+                        * Este nombre será visible para tus amigos y en el ranking.
+                      </p>
+                      {user.usernameSet && (
+                        <p className="text-[9px] font-bold text-blue-400 uppercase tracking-tight">
+                          El cambio de nombre cuesta 10,000 puntos después de la primera vez.
+                        </p>
+                      )}
+                    </div>
                   </div>
 
-                  <button 
-                    onClick={handleConfirmUsername}
-                    disabled={isCheckingUsername || !tempUsername.trim()}
-                    className="group relative flex w-full items-center justify-center gap-3 overflow-hidden rounded-2xl bg-blue-600 py-5 text-lg font-black uppercase tracking-widest text-white transition-all hover:bg-blue-500 disabled:opacity-50"
-                  >
-                    {isCheckingUsername ? (
-                      <Loader2 className="animate-spin" size={24} />
-                    ) : (
-                      <>
-                        <span>Confirmar Identidad</span>
-                        <Check size={24} />
-                      </>
+                  <div className="flex flex-col gap-3">
+                    <button 
+                      onClick={handleConfirmUsername}
+                      disabled={isCheckingUsername || !tempUsername.trim()}
+                      className="group relative flex w-full items-center justify-center gap-3 overflow-hidden rounded-2xl bg-blue-600 py-5 text-lg font-black uppercase tracking-widest text-white transition-all hover:bg-blue-500 disabled:opacity-50"
+                    >
+                      {isCheckingUsername ? (
+                        <Loader2 className="animate-spin" size={24} />
+                      ) : (
+                        <>
+                          <span>Confirmar Identidad</span>
+                          <Check size={24} />
+                        </>
+                      )}
+                    </button>
+                    {user.usernameSet && (
+                      <button 
+                        onClick={() => setShowUsernameModal(false)}
+                        className="text-[10px] font-black uppercase tracking-widest text-gray-600 hover:text-white transition-colors py-2"
+                      >
+                        Cancelar
+                      </button>
                     )}
-                  </button>
+                  </div>
                 </div>
               </motion.div>
             </div>
@@ -4021,31 +4406,58 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 <h3 className="mb-2 text-2xl font-black uppercase tracking-tighter text-white">JUGAR POR PUNTOS</h3>
                 <p className="mb-8 text-sm text-gray-400">Selecciona la dificultad</p>
                 
+                <div className="mb-4">
+                  <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-blue-400">Apostador de Puntos</p>
+                  <div className="flex items-center gap-4 rounded-2xl bg-white/5 p-4 border border-white/5">
+                    <button 
+                      onClick={() => setTrainingWager(prev => Math.max(0, prev - 10))}
+                      className="h-10 w-10 shrink-0 rounded-xl bg-gray-800 flex items-center justify-center text-white hover:bg-gray-700 transition-colors"
+                    >
+                      -10
+                    </button>
+                    <input 
+                      type="number" 
+                      value={trainingWager}
+                      onChange={(e) => setTrainingWager(Math.max(0, parseInt(e.target.value) || 0))}
+                      className="w-full bg-transparent text-center text-2xl font-black text-white outline-none"
+                    />
+                    <button 
+                      onClick={() => setTrainingWager(prev => prev + 10)}
+                      className="h-10 w-10 shrink-0 rounded-xl bg-blue-600 flex items-center justify-center text-white hover:bg-blue-500 transition-colors"
+                    >
+                      +10
+                    </button>
+                  </div>
+                  <p className="mt-3 text-[9px] font-bold text-gray-500 uppercase tracking-tighter text-center">
+                    la cantidad de puntos apostados define la longitud de tu personaje.
+                  </p>
+                </div>
+
                 <div className="space-y-4">
                   <button 
                     onClick={() => {
-                      onStartTraining(3);
+                      onStartTraining(5, trainingWager);
                       setShowTrainingModal(false);
                     }}
                     className="group flex w-full items-center justify-between rounded-2xl bg-white/5 p-5 border border-white/5 hover:border-green-500/30 hover:bg-green-500/10 transition-all"
                   >
                     <div className="text-left">
                       <p className="text-lg font-black text-white uppercase tracking-tighter">Modo Fácil</p>
-                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Hasta 3 usuarios - ideal para practicar</p>
+                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Hasta 5 usuarios - ideal para practicar</p>
                     </div>
                     <Check size={24} className="text-green-500 opacity-0 group-hover:opacity-100 transition-opacity" />
                   </button>
 
                   <button 
                     onClick={() => {
-                      onStartTraining(100);
+                      onStartTraining(50, trainingWager);
                       setShowTrainingModal(false);
                     }}
                     className="group flex w-full items-center justify-between rounded-2xl bg-white/5 p-5 border border-white/5 hover:border-red-500/30 hover:bg-red-500/10 transition-all"
                   >
                     <div className="text-left">
                       <p className="text-lg font-black text-white uppercase tracking-tighter">Modo Difícil</p>
-                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Hasta 100 usuarios - desafío extremo</p>
+                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Hasta 50 usuarios - desafío extremo</p>
                     </div>
                     <Zap size={24} className="text-red-500 opacity-0 group-hover:opacity-100 transition-opacity" />
                   </button>
@@ -4086,19 +4498,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                 </div>
 
                 <div className="p-6 space-y-4">
-                  {/* Audio Toggles */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <button 
-                      onClick={() => {
-                          const next = !musicEnabled;
-                          setMusicEnabled(next);
-                          soundManager.toggleMusic(next);
-                      }}
-                      className={`flex items-center justify-center gap-2 rounded-2xl p-4 font-bold border transition-all ${musicEnabled ? 'bg-blue-600/20 border-blue-500/30 text-blue-400' : 'bg-gray-800 border-white/5 text-gray-500'}`}
-                    >
-                      {musicEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
-                      <span className="text-[10px] uppercase tracking-widest">Música</span>
-                    </button>
+                  <div className="grid grid-cols-1 gap-3">
                     <button 
                       onClick={() => {
                           const next = !sfxEnabled;
@@ -4110,27 +4510,6 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       {sfxEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
                       <span className="text-[10px] uppercase tracking-widest">SFX</span>
                     </button>
-                  </div>
-
-                  {/* Music Volume Slider */}
-                  <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
-                    <div className="flex justify-between items-center mb-3">
-                      <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Volumen Música</span>
-                      <span className="text-[10px] font-black text-blue-400">{Math.round(musicVolume * 100)}%</span>
-                    </div>
-                    <input 
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.01"
-                      value={musicVolume}
-                      onChange={(e) => {
-                        const val = parseFloat(e.target.value);
-                        setMusicVolume(val);
-                        soundManager.setMusicVolume(val);
-                      }}
-                      className="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                    />
                   </div>
 
                   {/* Controls Button */}
@@ -4179,10 +4558,49 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager 
                       <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${highQuality ? 'left-6' : 'left-1'}`} />
                     </div>
                   </button>
+
+                  {/* Search for Updates Button */}
+                  <div className="space-y-2">
+                    <button 
+                      onClick={handleCheckUpdate}
+                      disabled={isCheckingUpdate}
+                      className="flex w-full items-center justify-between rounded-2xl bg-blue-600/10 p-4 font-bold border border-blue-500/20 hover:bg-blue-600/20 transition-all disabled:opacity-50"
+                    >
+                      <div className="flex items-center gap-3">
+                        {isCheckingUpdate ? (
+                          <Loader2 size={20} className="text-blue-400 animate-spin" />
+                        ) : (
+                          <Download size={20} className="text-blue-400" />
+                        )}
+                        <div className="text-left">
+                          <p className="text-[10px] uppercase tracking-widest text-blue-400">Buscar Actualizaciones</p>
+                          <p className="text-[8px] text-gray-400">verificar nueva version disponible.</p>
+                        </div>
+                      </div>
+                      {!isCheckingUpdate && <Search size={16} className="text-blue-500/50" />}
+                    </button>
+                    
+                    <AnimatePresence>
+                      {updateStatus && (
+                        <motion.div
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: 'auto', opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          className={`rounded-xl p-3 text-[10px] font-bold uppercase tracking-wider text-center ${
+                            updateStatus.type === 'available' ? 'bg-yellow-500/20 text-yellow-500' : 
+                            updateStatus.type === 'error' ? 'bg-red-500/20 text-red-500' : 
+                            'bg-green-500/20 text-green-500'
+                          }`}
+                        >
+                          {updateStatus.msg}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
                 </div>
 
                 <div className="p-6 bg-black/20 text-center">
-                  <p className="text-[9px] font-black uppercase tracking-[0.2em] text-gray-600">Viborita v2.4.0 • Ai Studio</p>
+                  <p className="text-[9px] font-black uppercase tracking-[0.2em] text-gray-600">Viborita 1.0.0 - Bonus Arg.</p>
                 </div>
               </motion.div>
             </div>

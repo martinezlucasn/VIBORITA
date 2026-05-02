@@ -563,11 +563,22 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       trail.unshift({ x: newX, y: newY });
     }
 
-    // New growth logic: starting size (12 base segments) + 1 segment every 7 points collected
+    // New growth logic: starting size (12 base segments) + scaling segments
     const collectedPoints = Math.max(0, playerRef.current.wager - wager);
     const pointsPerSegment = 5; // internal visual resolution
     const baseSegments = 12;
-    const targetSegments = baseSegments + Math.floor(collectedPoints / 7);
+    
+    // Multi-stage linear growth: 
+    // - Up to 3000 points: 1 segment per 50 points (60 segments)
+    // - After 3000 points: 1 segment per 150 points
+    let bonusSegments = 0;
+    if (collectedPoints <= 3000) {
+      bonusSegments = Math.floor(collectedPoints / 50);
+    } else {
+      bonusSegments = 60 + Math.floor((collectedPoints - 3000) / 150);
+    }
+    
+    const targetSegments = baseSegments + bonusSegments;
     const maxTrailLen = targetSegments * pointsPerSegment;
 
     if (speed > 0) {
@@ -581,8 +592,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     cameraRef.current.x += (head.x - cameraRef.current.x) * 0.1;
     cameraRef.current.y += (head.y - cameraRef.current.y) * 0.1;
 
-    // Dynamic zoom based on snake length to see ~80% of it
-    let targetZoomBase = Math.max(0.35, Math.min(1, 1200 / (maxTrailLen * 2 + 800)));
+    // Dynamic zoom: Stay closer even when big
+    let targetZoomBase = Math.max(0.5, Math.min(1.1, 1600 / (maxTrailLen * 1.2 + 800)));
     // ZOOM ABILITY: increase view width by 50%
     if (hasZoom) targetZoomBase *= 0.65; 
     
@@ -612,12 +623,12 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       id: `bot-${index}-${Math.random().toString(36).substr(2, 5)}`,
       userId: `bot-${index}`,
       displayName: `BOT ${name}`,
-      segments: Array.from({ length: 12 }, (_, j) => ({ 
+      segments: Array.from({ length: 10 }, (_, j) => ({ 
         x: startX - j * SEGMENT_DISTANCE, 
         y: startY 
       })),
       angle: Math.random() * Math.PI * 2,
-      wager: 5 + Math.random() * 10,
+      wager: 100,
       isAlive: true,
       lastUpdate: Date.now(),
       spawnTime: Date.now(),
@@ -665,11 +676,10 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     const trail = bot.segments;
     trail.unshift({ x: newX, y: newY });
 
-    // Bot growth follows the 1/7 rule too
-    const collectedPoints = Math.max(0, bot.wager - 5); // Assuming 5 is bot starting wager
+    // Bot growth: 10 base segments (100 pts) + 1 per 10 points
     const pointsPerSegment = 5;
-    const baseSegments = 12;
-    const targetSegments = baseSegments + Math.floor(collectedPoints / 7);
+    const botScore = Math.min(5000, bot.wager); // Higher limit
+    const targetSegments = Math.floor(botScore / 10);
     const maxTrailLen = targetSegments * pointsPerSegment;
 
     while (trail.length > maxTrailLen) {
@@ -749,14 +759,40 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       const isOtherInvulnerable = other.spawnTime && (Date.now() - other.spawnTime < 1500);
       if (isOtherInvulnerable) return;
 
+      // Case 1: My Head hits Their Body (I die)
       other.segments.forEach((seg, i) => {
-        // We only die if OUR head hits THEIR segments
         const d = Math.sqrt((head.x - seg.x) ** 2 + (head.y - seg.y) ** 2);
         if (d < CELL) {
-          // Collision detected!
           handleDeath(other.displayName);
         }
       });
+
+      // Case 2: Their Head hits My Body (They die)
+      const otherHead = other.segments[0];
+      if (otherHead) {
+        playerRef.current.segments.forEach((seg) => {
+          const d = Math.sqrt((otherHead.x - seg.x) ** 2 + (seg.y - otherHead.y) ** 2);
+          if (d < CELL) {
+            // They collided with me! From my perspective, they should die and drop food.
+            // We emit the death event to informer others/server
+            if (socketRef.current?.connected) {
+              socketRef.current.emit("player_died", {
+                id: other.id,
+                killerName: user.displayName,
+                wager: other.wager,
+                segments: other.segments
+              });
+            }
+            
+            // Local drop for immediate feedback
+            dropArenaFood(other);
+            
+            // Delete from local ref to avoid re-triggering this frame
+            delete otherPlayersRef.current[other.id];
+            delete interpolatedPlayersRef.current[other.id];
+          }
+        });
+      }
     });
 
     // Local Bots collision
@@ -804,27 +840,9 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         }
 
         if (hasCollided) {
-          // Drop food along segments
-          const segments = bot.segments;
-          const totalValue = segments.length;
-          const valuePerSegment = 1;
-          
-          // Drop food every 5 segments to avoid too many writes
-          const dropFrequency = 5;
-          for (let i = 0; i < segments.length; i += dropFrequency) {
-            const s = segments[i];
-            const val = valuePerSegment * dropFrequency;
-            if (val > 0) {
-              addDoc(collection(db, 'arenaFood'), {
-                x: s.x,
-                y: s.y,
-                value: val,
-                type: 'dropped',
-                color: bot.color1,
-                serverId
-              }).catch(() => {});
-            }
-          }
+          bot.isAlive = false;
+          bot.lastUpdate = Date.now();
+          dropArenaFood(bot);
         }
       }
     });
@@ -837,10 +855,78 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     }
   };
 
+  const dropArenaFood = (entity: PlayerSession) => {
+    if (!serverId) return;
+    const segments = entity.segments;
+    const isBot = entity.userId.startsWith('bot-');
+    
+    // Increased drop count for players to match bot generosity and make it feel like "monedas"
+    const dropCount = isBot ? Math.max(30, Math.floor(segments.length)) : Math.max(20, Math.floor(segments.length / 5));
+    const dropFrequency = isBot ? 1 : 5; 
+    
+    // Double points for bots, full points for players
+    const totalValue = isBot ? Math.floor(entity.wager * 2) : Math.floor(entity.wager);
+
+    if (totalValue <= 0) return;
+
+    const baseValuePerDrop = Math.max(1, Math.floor(totalValue / dropCount));
+    const remainder = totalValue % dropCount;
+
+    for (let i = 0; i < dropCount; i++) {
+      const idx = i * dropFrequency % segments.length;
+      const s = segments[idx] || segments[segments.length - 1];
+      let val = baseValuePerDrop + (i < remainder ? 1 : 0);
+      
+      if (val > 0) {
+        // Add random offset for more "volume"
+        const offsetX = (Math.random() - 0.5) * 40;
+        const offsetY = (Math.random() - 0.5) * 40;
+
+        // Visual distinction for high value drops (Gold coins)
+        let dropColor = entity.color1;
+        let dropType = 'dropped';
+        if (val >= 10 && !isBot) {
+          dropColor = '#fbbf24'; // Golden color for coins
+        }
+
+        addDoc(collection(db, 'arenaFood'), {
+          x: s.x + offsetX,
+          y: s.y + offsetY,
+          value: val,
+          type: dropType,
+          color: dropColor,
+          serverId
+        }).catch(() => {});
+        
+        // Add extra visual-only neon ring effect for better visibility
+        if (Math.random() > 0.5) {
+             addDoc(collection(db, 'arenaFood'), {
+                x: s.x + (Math.random() - 0.5) * 60,
+                y: s.y + (Math.random() - 0.5) * 60,
+                value: 0, // Visual only
+                type: 'dropped',
+                color: val >= 10 ? '#fff' : '#00f2ff', 
+                serverId
+            }).catch(() => {});
+        }
+      }
+    }
+  };
+
   const handleDeath = async (killerName?: string) => {
     if (!isAlive || !playerRef.current.isAlive) return;
     setIsAlive(false);
     playerRef.current.isAlive = false;
+
+    // Inform others via socket
+    if (socketRef.current?.connected) {
+      socketRef.current.emit("player_died", {
+        id: user.id,
+        killerName: killerName || "Obstáculo",
+        wager: score, // uses score in normal arena
+        segments: playerRef.current.segments
+      });
+    }
     
     if (boostTimerRef.current) clearTimeout(boostTimerRef.current);
     soundManager.play('death');
@@ -869,8 +955,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     await updateDoc(playerDocRef, { isAlive: false })
       .catch(e => handleFirestoreError(e, OperationType.UPDATE, 'arenaPlayers/' + user.id));
 
-    // Player drops NOTHING in "jugar por puntos" / Arena Mode
-    // Removed food dropping logic here
+    // Player drops their score for others to pick up
+    dropArenaFood(playerRef.current);
 
     // Update user highScore
     const userRef = doc(db, 'users', user.id);
@@ -964,7 +1050,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       displayName: user.displayName,
       text: msg,
       timestamp: Date.now(),
-      serverId
+      serverId,
+      avatarConfig: user.avatarConfig || null
     }).catch(e => handleFirestoreError(e, OperationType.CREATE, 'arenaChat'));
   };
 
@@ -1011,17 +1098,45 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
 
     // Draw Food
     Object.values(foodsRef.current).forEach((f: Food) => {
+      ctx.save();
+      
+      const isSpecial = f.value > 1 || f.type === 'dropped';
+      const isDropped = f.type === 'dropped';
+      const time = Date.now();
+      const pulse = Math.sin(time / 200) * 0.5 + 0.5;
+      const slowPulse = Math.sin(time / 800) * 0.5 + 0.5;
+
+      if (isSpecial) {
+        ctx.shadowBlur = isDropped ? 20 + (slowPulse * 15) : 15 + (pulse * 15);
+        ctx.shadowColor = f.color || '#fff';
+        ctx.globalAlpha = isDropped ? 0.6 + (slowPulse * 0.4) : 0.8 + (pulse * 0.2);
+      } else {
+        ctx.shadowBlur = 5;
+        ctx.shadowColor = f.color || '#fff';
+      }
+
       ctx.fillStyle = f.color || '#ff3344';
       ctx.beginPath();
-      ctx.arc(f.x, f.y, 6, 0, Math.PI * 2);
+      ctx.arc(f.x, f.y, isSpecial ? 7 : 6, 0, Math.PI * 2);
       ctx.fill();
 
       // Subtle neon glow for special food
-      if (f.value > 1) {
-        ctx.strokeStyle = f.color || '#fbbf24';
-        ctx.lineWidth = 2;
+      if (isSpecial) {
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = isDropped ? 3 : 2;
         ctx.stroke();
+        
+        // Extra neon ring for dropped bot points
+        if (isDropped) {
+            ctx.beginPath();
+            ctx.strokeStyle = f.color || '#00f2ff';
+            ctx.lineWidth = 1;
+            ctx.arc(f.x, f.y, 12 + (slowPulse * 4), 0, Math.PI * 2);
+            ctx.stroke();
+        }
       }
+      
+      ctx.restore();
     });
 
     // Draw Arena Items
@@ -1084,22 +1199,23 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
   };
 
   const drawMinimap = (ctx: CanvasRenderingContext2D) => {
-    const mapSize = 135;
-    const padding = 10;
+    const mapSize = 140;
+    const padding = 20;
     const x = window.innerWidth - mapSize - padding;
     const y = window.innerHeight - mapSize - padding;
-    const zoom = 0.05; // Mini-map zoom level
+    const zoom = 0.065; // ~70% of 3000px world (140 / 0.065 approx 2150px)
 
     ctx.save();
+    ctx.globalAlpha = 0.5; // 50% invisibility as requested
     ctx.translate(x, y);
 
     // Background
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-    ctx.strokeStyle = 'rgba(59, 130, 246, 0.35)';
-    ctx.lineWidth = 2;
+    ctx.fillStyle = 'rgba(0, 5, 10, 0.8)';
+    ctx.strokeStyle = 'rgba(0, 242, 255, 0.4)';
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
     if (ctx.roundRect) {
-      ctx.roundRect(0, 0, mapSize, mapSize, 20);
+      ctx.roundRect(0, 0, mapSize, mapSize, 16);
     } else {
       ctx.rect(0, 0, mapSize, mapSize);
     }
@@ -1107,11 +1223,11 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     ctx.stroke();
     ctx.clip();
 
-    // Minimap Label
-    ctx.fillStyle = 'rgba(59, 130, 246, 0.8)';
-    ctx.font = 'bold 10px Arial';
-    ctx.textAlign = 'left';
-    ctx.fillText('RADAR ONLINE', 8, 15);
+    // Minimap Label removed for "low detail" look but can keep a small indicator
+    ctx.fillStyle = 'rgba(0, 242, 255, 0.6)';
+    ctx.font = 'black 8px Arial';
+    ctx.textAlign = 'right';
+    ctx.fillText('LIVE RADAR', mapSize - 8, 12);
 
     // Center on player
     const head = playerRef.current.segments[0];
@@ -1120,36 +1236,44 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     ctx.translate(-head.x, -head.y);
 
     // World Border in minimap
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-    ctx.lineWidth = 20;
+    ctx.strokeStyle = 'rgba(0, 242, 255, 0.2)';
+    ctx.lineWidth = 10;
     ctx.strokeRect(0, 0, WORLD_W, WORLD_H);
 
     // Draw Other Players on minimap
-    ctx.fillStyle = '#ff4422';
+    ctx.fillStyle = '#ff3344'; // Red for enemies
     Object.values(otherPlayersRef.current).forEach(otherVal => {
       const other = otherVal as PlayerSession;
       if (!other.isAlive || !other.segments || other.segments.length === 0) return;
       const otherHead = other.segments[0];
       ctx.beginPath();
-      ctx.arc(otherHead.x, otherHead.y, 40, 0, Math.PI * 2);
+      ctx.arc(otherHead.x, otherHead.y, 35, 0, Math.PI * 2);
       ctx.fill();
     });
 
     // Draw Bots on minimap
-    ctx.fillStyle = '#ffaa00';
+    ctx.fillStyle = '#ffaa00'; // Orange for bots
     botsRef.current.forEach(bot => {
       if (!bot.isAlive) return;
       const botHead = bot.segments[0];
       ctx.beginPath();
-      ctx.arc(botHead.x, botHead.y, 40, 0, Math.PI * 2);
+      ctx.arc(botHead.x, botHead.y, 35, 0, Math.PI * 2);
       ctx.fill();
     });
 
     // Draw Player on minimap (always at center due to translation)
-    ctx.fillStyle = '#22ff44';
+    ctx.fillStyle = '#00f2ff'; // Cyan for player
     ctx.beginPath();
-    ctx.arc(head.x, head.y, 40, 0, Math.PI * 2);
+    ctx.arc(head.x, head.y, 45, 0, Math.PI * 2);
     ctx.fill();
+
+    // Pulse effect for player
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 5;
+    ctx.globalAlpha = 0.2 + Math.sin(Date.now() / 200) * 0.1;
+    ctx.beginPath();
+    ctx.arc(head.x, head.y, 60 + Math.sin(Date.now() / 200) * 10, 0, Math.PI * 2);
+    ctx.stroke();
 
     ctx.restore();
   };
@@ -1562,11 +1686,24 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
                   <X size={14} />
                 </button>
               </div>
-              <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+              <div className="flex-1 overflow-y-auto space-y-3 pr-1 custom-scrollbar">
                 {messages.map((msg, idx) => (
-                  <div key={`msg-${msg.id}-${idx}`} className="text-sm">
-                    <span className="font-bold text-blue-400">{msg.displayName}: </span>
-                    <span className="text-gray-200">{msg.text}</span>
+                  <div key={`msg-${msg.id}-${idx}`} className="flex items-start gap-2 text-sm">
+                    {msg.avatarConfig ? (
+                      <img 
+                        src={`https://api.dicebear.com/7.x/${msg.avatarConfig.style}/svg?seed=${msg.avatarConfig.seed}`}
+                        alt={msg.displayName}
+                        className="h-5 w-5 rounded-md mt-0.5"
+                      />
+                    ) : (
+                      <div className="h-5 w-5 rounded-md bg-blue-500/20 flex items-center justify-center text-[10px] font-bold text-blue-400 mt-0.5">
+                        {msg.displayName[0].toUpperCase()}
+                      </div>
+                    )}
+                    <div className="flex-1">
+                      <span className="font-bold text-blue-400 text-[10px]">{msg.displayName}</span>
+                      <p className="text-gray-200 leading-tight">{msg.text}</p>
+                    </div>
                   </div>
                 ))}
               </div>

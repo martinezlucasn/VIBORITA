@@ -87,7 +87,7 @@ service cloud.firestore {
 
     function isValidUser(data) {
       let requiredFields = ['displayName', 'coins', 'lastActive'];
-      let optionalFields = ['id', 'email', 'ownedSkins', 'equippedSkin', 'highScore', 'highScoreMonedas', 'monedas', 'role', 'proAccessUntil', 'millonarioAccessUntil', 'usernameSet', 'botKills', 'insomniaCount', 'notifiedMedals', 'inventoryItems', 'inventoryAbilities', 'equippedAbilities'];
+      let optionalFields = ['id', 'email', 'ownedSkins', 'equippedSkin', 'highScore', 'highScoreMonedas', 'monedas', 'role', 'proAccessUntil', 'millonarioAccessUntil', 'usernameSet', 'botKills', 'insomniaCount', 'notifiedMedals', 'inventoryItems', 'inventoryAbilities', 'equippedAbilities', 'dailyRewardsCycle', 'lastDailyRewardClaim', 'lastActive', 'createdAt', 'updatedAt', 'lastLogin', 'bio', 'profileTheme', 'profileBorder', 'unlockedThemes', 'unlockedBorders', 'trophies', 'claimedPlatinumReward'];
       return data.keys().hasAll(requiredFields) &&
              data.keys().hasOnly(requiredFields.concat(optionalFields)) &&
              data.displayName is string &&
@@ -110,7 +110,15 @@ service cloud.firestore {
              (!('notifiedMedals' in data) || data.notifiedMedals is list) &&
              (!('inventoryItems' in data) || data.inventoryItems is map) &&
              (!('inventoryAbilities' in data) || data.inventoryAbilities is map) &&
-             (!('equippedAbilities' in data) || data.equippedAbilities is list);
+             (!('equippedAbilities' in data) || data.equippedAbilities is list) &&
+             (!('dailyRewardsCycle' in data) || data.dailyRewardsCycle is number) &&
+             (!('lastDailyRewardClaim' in data) || data.lastDailyRewardClaim is number) &&
+             (!('bio' in data) || data.bio is string) &&
+             (!('profileTheme' in data) || data.profileTheme is string) &&
+             (!('profileBorder' in data) || data.profileBorder is string) &&
+             (!('unlockedThemes' in data) || data.unlockedThemes is list) &&
+             (!('unlockedBorders' in data) || data.unlockedBorders is list) &&
+             (!('trophies' in data) || data.trophies is number) && (!('claimedPlatinumReward' in data) || data.claimedPlatinumReward is bool);
     }
 
     function isValidTicketPurchase(data) {
@@ -209,7 +217,20 @@ service cloud.firestore {
              data.gamesPlayed is number &&
              data.timestamp is number &&
              (!('stats' in data) || data.stats is map) &&
-             (!('lastMatch' in data) || data.lastMatch is number);
+             (!('lastMatch' in data) || data.lastMatch is number) &&
+             (!('level' in data) || data.level is number) &&
+             (!('exp' in data) || data.exp is number) &&
+             (!('lastInteractionTime' in data) || data.lastInteractionTime is number);
+    }
+
+    function isValidPrivateMessage(data) {
+      return data.keys().hasAll(['friendshipId', 'senderId', 'text', 'timestamp']) &&
+             data.friendshipId is string &&
+             data.senderId == request.auth.uid &&
+             data.text is string &&
+             data.text.size() > 0 &&
+             data.text.size() <= 500 &&
+             data.timestamp is number;
     }
 
     function isValidNotification(data) {
@@ -244,9 +265,22 @@ service cloud.firestore {
              data.serverId is string;
     }
 
+    function isValidAppConfig(data) {
+      return data.keys().hasAll(['version', 'minVersion', 'downloadUrl']) &&
+             data.version is string &&
+             data.minVersion is string &&
+             data.downloadUrl is string &&
+             (!('updateMessage' in data) || data.updateMessage is string);
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
+
+    match /app_config/{configId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
 
     match /users/{userId} {
       allow read: if isAuthenticated();
@@ -346,6 +380,14 @@ service cloud.firestore {
       allow create: if isAuthenticated() && isValidFriendship(request.resource.data) && (request.auth.uid in request.resource.data.uids);
       allow update: if isAuthenticated() && isValidFriendship(request.resource.data) && (request.auth.uid in resource.data.uids);
       allow delete: if isAuthenticated() && (request.auth.uid in resource.data.uids);
+    }
+
+    match /privateMessages/{messageId} {
+      allow read: if isAuthenticated() && (request.auth.uid in get(/databases/$(database)/documents/friendships/$(resource.data.friendshipId)).data.uids);
+      allow create: if isAuthenticated() && 
+                    isValidPrivateMessage(request.resource.data) && 
+                    (request.auth.uid in get(/databases/$(database)/documents/friendships/$(request.resource.data.friendshipId)).data.uids);
+      allow delete: if false;
     }
 
     match /notifications/{notificationId} {

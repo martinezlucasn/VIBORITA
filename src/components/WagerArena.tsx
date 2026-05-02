@@ -4,7 +4,7 @@ import { WORLD_W, WORLD_H, BASE_SPEED, CELL, ALL_SKINS, SEGMENT_DISTANCE } from 
 import { ARENA_ITEMS } from '../items';
 import { ALL_ABILITIES } from '../abilities';
 import { GoldPointIcon } from './Icons';
-import { doc, updateDoc, increment, setDoc, onSnapshot, collection, query, where, deleteDoc, addDoc, getDocs, getDoc } from 'firebase/firestore';
+import { doc, updateDoc, increment, setDoc, onSnapshot, collection, query, where, deleteDoc, addDoc, getDocs, getDoc, orderBy, limit } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { motion, AnimatePresence } from 'motion/react';
 import { Trophy, ArrowLeft, Zap, Coins, LogOut, Crown, ShieldCheck, X } from 'lucide-react';
@@ -17,6 +17,8 @@ interface WagerArenaProps {
   growthWager: number;
   category: string;
   onGameOver: () => void;
+  onReturnToRival?: (rivalId: string) => void;
+  onStartWager: (wager: number, growthWager: number, category: string) => void;
 }
 
 import { findAvailableServer } from '../lib/serverManager';
@@ -29,7 +31,7 @@ interface CompetitionStats {
   coinsLost: number;
 }
 
-export default function WagerArena({ user, wager, growthWager, category, onGameOver }: WagerArenaProps) {
+export default function WagerArena({ user, wager, growthWager, category, onGameOver, onReturnToRival, onStartWager }: WagerArenaProps) {
   const isPrivate = category.startsWith('private_');
   const worldW = isPrivate ? WORLD_W / 2 : WORLD_W;
   const worldH = isPrivate ? WORLD_H / 2 : WORLD_H;
@@ -41,6 +43,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
   const [isCollecting, setIsCollecting] = useState(false);
   const [finalBalance, setFinalBalance] = useState(0);
   const [competitionStats, setCompetitionStats] = useState<CompetitionStats | null>(null);
+  const [rematchStatus, setRematchStatus] = useState<'none' | 'sending' | 'waiting' | 'accepted' | 'rejected'>('none');
   const [opponentInfo, setOpponentInfo] = useState<{ id: string, name: string } | null>(null);
   const [isBoosting, setIsBoosting] = useState(false);
   const [serverId, setServerId] = useState<string | null>(null);
@@ -155,8 +158,21 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
   const channelRef = useRef<any>(null);
   const initialWagerRef = useRef(wager);
 
+  const [showNewWinAnim, setShowNewWinAnim] = useState(false);
+
+  useEffect(() => {
+    if (isWinner && !showNewWinAnim) {
+      const timer = setTimeout(() => setShowNewWinAnim(true), 500);
+      return () => clearTimeout(timer);
+    }
+  }, [isWinner]);
+
   useEffect(() => {
     if (!isAlive && !isWinner && !isCollecting && category.startsWith('private_')) {
+      // For private rooms, we wait for user interaction to exit
+      return;
+    }
+    if (!isAlive && !isWinner && !isCollecting) {
       const timer = setTimeout(() => {
         onGameOver();
       }, 4000);
@@ -213,24 +229,26 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
 
       socket.on("server_death", ({ killerName }) => {
         console.log("Server confirmed death (Wager)!");
-        handleDeath();
+        const killerId = Object.keys(otherPlayersRef.current).find(id => otherPlayersRef.current[id].displayName === killerName);
+        handleDeath(killerId);
       });
 
       socket.on("player_died", async ({ id, wager: victimWager, segments: victimSegments, killerName }) => {
         if (id !== user.id) {
-          // If I am the killer
-          if (killerName === user.displayName && victimWager && victimSegments) {
-            if (category.startsWith('private_')) {
-              // In private rooms, coins are transferred directly to the winner's score
-              setScore(s => s + victimWager);
-              playerRef.current.wager += victimWager;
-              soundManager.play('goldFood');
-              
-              // Trigger Win Logic for Private Room
-              handleWin(victimWager);
-            } else {
-              // In public rooms, coins are dropped in the arena
+          // If in private room, the remaining player is ALWAYS the winner if the other dies
+          if (category.startsWith('private_')) {
+             // Identify opponent if not already done
+             if (!opponentInfo) {
+               setOpponentInfo({ id, name: otherPlayersRef.current[id]?.displayName || killerName || 'Oponente' });
+             }
+             
+             // handleWin will set setIsWinner(true) and setIsAlive(false) correctly
+             handleWin(victimWager || wager, id);
+          } else {
+            // In public rooms, only if I am the killer or specifically informed
+            if (killerName === user.displayName && victimWager && victimSegments) {
               dropWagerCoins(victimWager, victimSegments);
+              updateCompetitionStats(true, victimWager, id);
             }
           }
           delete otherPlayersRef.current[id];
@@ -515,8 +533,10 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     }
 
     if (isBoosting && !isStopped) {
-      // Consume score for boost
-      setScore(s => Math.max(0, s - 0.2 * dt * 60));
+      // Consume score and wager for boost (deflationary mechanic)
+      const cost = 0.2 * dt * 60;
+      setScore(s => Math.max(0, s - cost));
+      playerRef.current.wager = Math.max(0, playerRef.current.wager - cost);
     }
     const newX = head.x + Math.cos(playerRef.current.angle) * speed * dt;
     const newY = head.y + Math.sin(playerRef.current.angle) * speed * dt;
@@ -533,11 +553,20 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       trail.unshift({ x: newX, y: newY });
     }
 
-    // Growth logic: starting size (base segments from wager) + 1 segment every 7 coins collected
+    // Growth logic: starting size (base segments from wager) + scaling segments
     const collectedCoins = Math.max(0, playerRef.current.wager - initialWagerRef.current);
     const pointsPerSegment = 5;
     const baseSegments = initialSegCount;
-    const targetSegments = baseSegments + Math.floor(collectedCoins / 7);
+    
+    let bonusSegments = 0;
+    if (collectedCoins <= 3000) {
+      bonusSegments = Math.floor(collectedCoins / 10);
+    } else {
+      // 300 segments from first 3000 coins (3000/10) + 1 segment every 50 coins after that
+      bonusSegments = 300 + Math.floor((collectedCoins - 3000) / 50);
+    }
+    
+    const targetSegments = baseSegments + bonusSegments;
     const maxTrailLen = targetSegments * pointsPerSegment;
 
     if (speed > 0) {
@@ -633,121 +662,170 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       const isOtherInvulnerable = other.spawnTime && (Date.now() - other.spawnTime < 1500);
       if (isOtherInvulnerable) return;
 
+      // Case 1: My Head vs Their Body (I die)
       other.segments.forEach(seg => {
         const d = Math.sqrt((head.x - seg.x) ** 2 + (head.y - seg.y) ** 2);
         if (d < CELL) {
           handleDeath();
         }
       });
+
+      // Case 2: Their Head vs My Body (They die)
+      const otherHead = other.segments[0];
+      if (otherHead) {
+        playerRef.current.segments.forEach(seg => {
+          const d = Math.sqrt((otherHead.x - seg.x) ** 2 + (seg.y - otherHead.y) ** 2);
+          if (d < CELL) {
+            // Tell server they died by hitting me
+            if (socketRef.current?.connected) {
+              socketRef.current.emit("player_died", {
+                id: other.id,
+                killerName: user.displayName,
+                wager: other.wager,
+                segments: other.segments
+              });
+            }
+
+            // Drop coins locally for immediate effect
+            if (!category.startsWith('private_')) {
+              dropWagerCoins(other.wager, other.segments);
+            }
+
+            // Update local stats
+            updateCompetitionStats(true, other.wager, other.id);
+
+            // Cleanup local refs
+            delete otherPlayersRef.current[other.id];
+            delete interpolatedPlayersRef.current[other.id];
+          }
+        });
+      }
     });
   };
 
-  const updateCompetitionStats = async (isWin: boolean, coins: number) => {
-    if (!opponentInfo || !category.startsWith('private_')) return;
+  const updateCompetitionStats = async (isWin: boolean, coins: number, opponentIdOverride?: string) => {
+    const opponentId = opponentIdOverride || opponentInfo?.id || Object.keys(otherPlayersRef.current).find(id => id !== user.id);
+    if (!opponentId) {
+      console.log("No opponentId skipping stats update");
+      return;
+    }
 
-    const statsId = [user.id, opponentInfo.id].sort().join('_');
+    // Check if they are friends first
+    const fQuery = query(collection(db, 'friendships'), where('uids', 'array-contains', user.id));
+    const fSnap = await getDocs(fQuery);
+    const friendshipDoc = fSnap.docs.find(d => d.data().uids.includes(opponentId));
+
+    // We ONLY update stats if it's a private room OR if they are friends
+    if (!category.startsWith('private_') && !friendshipDoc) {
+      console.log("Not a private room and not friends, skipping stats update");
+      return;
+    }
+
+    const statsId = [user.id, opponentId].sort().join('_');
     const statsRef = doc(db, 'competitionStats', statsId);
     
     try {
       const snap = await getDoc(statsRef);
       let currentStats: any = {
         [user.id]: { wins: 0, losses: 0, coinsWon: 0, coinsLost: 0 },
-        [opponentInfo.id]: { wins: 0, losses: 0, coinsWon: 0, coinsLost: 0 }
+        [opponentId]: { wins: 0, losses: 0, coinsWon: 0, coinsLost: 0 }
       };
 
       if (snap.exists()) {
         currentStats = snap.data();
       }
 
-      const myStats = currentStats[user.id] || { wins: 0, losses: 0, coinsWon: 0, coinsLost: 0 };
-      const oppStats = currentStats[opponentInfo.id] || { wins: 0, losses: 0, coinsWon: 0, coinsLost: 0 };
+      const myStats = { ...(currentStats[user.id] || { wins: 0, losses: 0, coinsWon: 0, coinsLost: 0 }) };
 
       if (isWin) {
         myStats.wins++;
         myStats.coinsWon += coins;
-        oppStats.losses++;
-        oppStats.coinsLost += coins;
       } else {
         myStats.losses++;
         myStats.coinsLost += coins;
-        oppStats.wins++;
-        oppStats.coinsWon += coins;
       }
 
       const updatedStats = {
         ...currentStats,
         [user.id]: myStats,
-        [opponentInfo.id]: oppStats,
         lastMatch: Date.now()
       };
 
-      await setDoc(statsRef, updatedStats);
+      await setDoc(statsRef, updatedStats, { merge: true });
       setCompetitionStats(myStats);
 
       // Update Friendship stats if they are friends
-      const fQuery = query(collection(db, 'friendships'), where('uids', 'array-contains', user.id));
-      const fSnap = await getDocs(fQuery);
-      const friendshipDoc = fSnap.docs.find(d => d.data().uids.includes(opponentInfo.id));
-      
       if (friendshipDoc) {
-        await updateDoc(friendshipDoc.ref, {
+        const updateData: any = {
           gamesPlayed: increment(1),
-          [`stats.${user.id}.wins`]: isWin ? increment(1) : increment(0),
-          [`stats.${opponentInfo.id}.wins`]: !isWin ? increment(1) : increment(0),
           lastMatch: Date.now()
-        });
+        };
+
+        // ONLY update current user's side to avoid double-counting when both players call this
+        if (isWin) {
+          updateData[`stats.${user.id}.wins`] = increment(1);
+        }
+        
+        // Also update regular points/coins record for current user
+        if (isWin) {
+          updateData[`stats.${user.id}.coinsWon`] = increment(coins);
+        } else {
+          updateData[`stats.${user.id}.coinsLost`] = increment(coins);
+        }
+
+        await updateDoc(friendshipDoc.ref, updateData);
       }
     } catch (error) {
       console.error("Error updating competition stats:", error);
     }
   };
 
-  const handleDeath = async () => {
+  const handleDeath = async (killerId?: string) => {
     if (!isAlive) return;
     setIsAlive(false);
     playerRef.current.isAlive = false;
-    if (boostTimerRef.current) clearTimeout(boostTimerRef.current);
-    soundManager.play('death');
 
-    // Update competition stats if in private room
-    if (category.startsWith('private_')) {
-      await updateCompetitionStats(false, wager);
-    }
-
+    // Drop coins immediately for best responsiveness
     // Drop coins only in public rooms. In private rooms, coins are transferred directly to the killer.
     if (!category.startsWith('private_')) {
       dropWagerCoins(playerRef.current.wager, playerRef.current.segments);
     }
-
-    // Update balance: only return collected coins (score), wager remains lost
-    const userRef = doc(db, 'users', user.id);
-    const newMonedas = user.monedas + score;
-    const newHighScore = Math.max(user.highScoreMonedas, newMonedas);
-
-    await updateDoc(userRef, {
-      monedas: increment(score),
-      highScoreMonedas: newHighScore
-    }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
-
-    // Sync with Supabase
-    await supabase.from('profiles').update({ 
-      monedas: newMonedas,
-      high_score_monedas: newHighScore
-    }).eq('id', user.id);
-        
-    // Record transaction
-    if (score > 0) {
-      await supabase.from('transactions').insert({
-        user_id: user.id,
-        type: 'collected',
-        currency: 'monedas',
-        amount: score,
-        reason: 'wager_game_death_coins',
-        timestamp: new Date().toISOString()
+    
+    // Inform others via socket
+    if (socketRef.current?.connected) {
+      socketRef.current.emit("player_died", {
+        id: user.id,
+        killerName: killerId ? (otherPlayersRef.current[killerId]?.displayName || "Oponente") : "Obstáculo",
+        wager: playerRef.current.wager,
+        segments: playerRef.current.segments
       });
     }
+
+    if (boostTimerRef.current) clearTimeout(boostTimerRef.current);
+    soundManager.play('death');
+
+    // Update competition stats - don't await to avoid blocking UI
+    updateCompetitionStats(false, wager, killerId);
+
+    // Update balance: only if they survived and are withdrawing.
+    // When a player dies, they lose their initial wager AND all collected coins.
+    // In Public Rooms, these are dropped on the map. In Private Rooms, they are transferred to the winner.
+    // In both cases, the victim walk away with 0 new coins to avoid inflation.
     
-    // Record the loss of the initial wager
+    // We still update the high score if applicable
+    const newHighScore = Math.max(user.highScoreMonedas, user.monedas + score);
+    if (newHighScore > user.highScoreMonedas) {
+      const userRef = doc(db, 'users', user.id);
+      await updateDoc(userRef, {
+        highScoreMonedas: newHighScore
+      }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+      
+      await supabase.from('profiles').update({ 
+        high_score_monedas: newHighScore
+      }).eq('id', user.id);
+    }
+    
+    // Record the loss of the initial wager (Always record the loss transaction)
     await supabase.from('transactions').insert({
       user_id: user.id,
       type: 'lost',
@@ -757,16 +835,67 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       timestamp: new Date().toISOString()
     });
 
-    // Cleanup private room if applicable
-    if (category.startsWith('private_')) {
-      const roomId = category.replace('private_', '');
-      await deleteDoc(doc(db, 'privateRooms', roomId)).catch(() => {});
-    } else {
+    // Handle game over delay based on rematch
+    if (!category.startsWith('private_')) {
       setTimeout(onGameOver, 3000);
     }
   };
 
-  const handleWin = async (winAmount: number) => {
+  const handleRematchRequest = async () => {
+    if (!opponentInfo || rematchStatus !== 'none') return;
+    
+    setRematchStatus('sending');
+    try {
+      // Create a notification for the opponent
+      await addDoc(collection(db, 'notifications'), {
+        type: 'rematch_invite',
+        fromId: user.id,
+        fromName: user.displayName,
+        toId: opponentInfo.id,
+        wager,
+        growthWager,
+        category,
+        status: 'pending',
+        timestamp: Date.now()
+      });
+      
+      setRematchStatus('waiting');
+      
+      // Listen for the rematch result
+      const q = query(
+        collection(db, 'notifications'), 
+        where('type', '==', 'rematch_invite'),
+        where('fromId', '==', user.id),
+        where('toId', '==', opponentInfo.id),
+        where('status', 'in', ['accepted', 'rejected']),
+        orderBy('timestamp', 'desc'),
+        limit(1)
+      );
+      
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        if (!snapshot.empty) {
+          const notif = snapshot.docs[0].data();
+          if (notif.status === 'accepted') {
+            setRematchStatus('accepted');
+            // Re-initialize game with same settings
+            onStartWager(wager, growthWager, category);
+          } else if (notif.status === 'rejected') {
+            setRematchStatus('rejected');
+            // Back to menu after 2 seconds
+            setTimeout(() => {
+              onGameOver();
+            }, 2000);
+          }
+          unsubscribe();
+        }
+      });
+    } catch (e) {
+      console.error("Error requesting rematch:", e);
+      setRematchStatus('none');
+    }
+  };
+
+  const handleWin = async (winAmount: number, opponentId?: string) => {
     if (!isAlive) return;
     setIsAlive(false);
     setIsWinner(true);
@@ -776,10 +905,11 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
 
     // Update competition stats if in private room
     if (category.startsWith('private_')) {
-      await updateCompetitionStats(true, wager);
+      await updateCompetitionStats(true, wager, opponentId);
     }
 
-    const totalToReturn = Math.floor(playerRef.current.wager);
+    const myWagerValue = Math.floor(playerRef.current.wager);
+    const totalToReturn = myWagerValue + Math.floor(winAmount);
     const userRef = doc(db, 'users', user.id);
     const newMonedas = user.monedas + totalToReturn;
     const newHighScore = Math.max(user.highScoreMonedas, newMonedas);
@@ -813,33 +943,49 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       await deleteDoc(doc(db, 'privateRooms', roomId)).catch(() => {});
     }
   };
-
   const dropWagerCoins = (wagerVal: number, segments: {x: number, y: number}[]) => {
-    if (!serverId || segments.length === 0) return;
+    const sId = serverId || playerRef.current.serverId;
+    if (!sId || segments.length === 0) return;
     
-    // We drop the total wager value distributed among grouped segments (performance optimization)
-    const totalValue = Math.floor(wagerVal);
-    const expiresAt = Date.now() + 4 * 60 * 1000; // 4 minutes
+    // Total value is sum of initial wager + collected coins (score/growth)
+    // playerRef.current.wager already includes the initial wager + added value from coins
+    const totalValue = Math.max(0, Math.floor(wagerVal || 0));
+    const expiresAt = Date.now() + 33 * 60 * 1000;
 
-    // Grouping: drop every 3 segments for better visual spread
-    const dropFrequency = 3;
-    const valuePerDrop = Math.max(1, Math.floor(totalValue / (segments.length / dropFrequency)));
+    // Use a fixed count of orbs to define the silhouette clearly but efficiently
+    // We target ~1 orb every few units of length to keep it recognizable
+    const dropCount = Math.max(12, Math.min(50, Math.floor(segments.length / 3)));
+    
+    if (dropCount <= 0 || segments.length === 0) return;
 
-    for (let i = 0; i < segments.length; i += dropFrequency) {
-      const seg = segments[i];
-      const val = valuePerDrop;
+    // Distribution logic: divide totalValue by dropCount
+    const baseValuePerDrop = Math.floor(totalValue / dropCount);
+    const remainder = totalValue % dropCount;
+
+    for (let i = 0; i < dropCount; i++) {
+      // Scale index to cover the ENTIRE length of segments from head to tail
+      const segIndex = Math.floor((i / (dropCount - 1 || 1)) * (segments.length * 0.9)); // Focus on main body
+      const seg = segments[segIndex];
+      if (!seg) continue;
+
+      // Assign the value: base + 1 if we have remainder left
+      const val = baseValuePerDrop + (i < remainder ? 1 : 0);
       
-      if (val > 0) {
-        addDoc(collection(db, 'wagerCoins'), {
-          x: seg.x,
-          y: seg.y,
-          value: val,
-          serverId,
-          category,
-          expiresAt,
-          color: '#00f2ff' // Neon Blue
-        }).catch(e => handleFirestoreError(e, OperationType.CREATE, 'wagerCoins'));
-      }
+      // Even if val is 0, we drop it to maintain the visual silhouette
+      const scatterX = (Math.random() - 0.5) * 8;
+      const scatterY = (Math.random() - 0.5) * 8;
+
+      addDoc(collection(db, 'wagerCoins'), {
+        x: seg.x + scatterX,
+        y: seg.y + scatterY,
+        value: val,
+        serverId: sId,
+        category,
+        expiresAt,
+        type: 'dropped',
+        color: '#00f2ff', // Specific Neon Blue for death loot
+        isDeathLoot: true
+      }).catch(e => handleFirestoreError(e, OperationType.CREATE, 'wagerCoins'));
     }
   };
 
@@ -919,34 +1065,27 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     ctx.strokeRect(0, 0, worldW, worldH);
     ctx.shadowBlur = 0;
 
-    // Dropped Coins (Neon Blue Points with pulse)
-    const coinPulse = Math.sin(Date.now() / 400) * 3;
+    // Dropped Coins (Simplified for Performance)
     ctx.save();
-    
-    // Draw all outer glows first for better additive effect
-    ctx.globalCompositeOperation = 'lighter';
     droppedCoinsRef.current.forEach(c => {
-      ctx.shadowBlur = 15 + coinPulse;
-      ctx.shadowColor = '#00f2ff';
-      ctx.fillStyle = 'rgba(0, 242, 255, 0.4)';
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, 7, 0, Math.PI * 2);
-      ctx.fill();
-    });
-
-    // Draw all white cores
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = '#fff';
-    droppedCoinsRef.current.forEach(c => {
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, 2.5, 0, Math.PI * 2);
-      ctx.fill();
+      const coinColor = c.color || '#00f2ff';
       
-      // Additional small neon spark
-      ctx.fillStyle = '#00f2ff';
+      // Simple Glow (Alpha based, no shadow)
+      ctx.fillStyle = hexToRgba(coinColor, 0.25);
       ctx.beginPath();
-      ctx.arc(c.x, c.y, 1, 0, Math.PI * 2);
+      ctx.arc(c.x, c.y, 10, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Sharp Core
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Color hint core
+      ctx.fillStyle = coinColor;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 1.5, 0, Math.PI * 2);
       ctx.fill();
     });
     ctx.restore();
@@ -1024,6 +1163,83 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     }
 
     ctx.restore();
+
+    // Render Minimap after game world restore but before UI
+    if (isAlive) {
+      renderMinimap(ctx);
+    }
+  };
+
+  const renderMinimap = (ctx: CanvasRenderingContext2D) => {
+    const mapSize = window.innerWidth < 640 ? 100 : 150;
+    const padding = 20;
+    const x = window.innerWidth - mapSize - padding;
+    const y = window.innerHeight - mapSize - padding;
+
+    ctx.save();
+    ctx.translate(x, y);
+
+    // Background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (ctx.roundRect) {
+      ctx.roundRect(0, 0, mapSize, mapSize, 16);
+    } else {
+      ctx.rect(0, 0, mapSize, mapSize);
+    }
+    ctx.fill();
+    ctx.stroke();
+
+    // Scale factors
+    const scaleX = mapSize / worldW;
+    const scaleY = mapSize / worldH;
+
+    // World border
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+    ctx.strokeRect(0, 0, mapSize, mapSize);
+
+    // Coins (Batching for performance)
+    ctx.fillStyle = 'rgba(251, 191, 36, 0.4)';
+    droppedCoinsRef.current.forEach(c => {
+      if (c.x * scaleX < 0 || c.x * scaleX > mapSize || c.y * scaleY < 0 || c.y * scaleY > mapSize) return;
+      ctx.fillRect(c.x * scaleX - 0.5, c.y * scaleY - 0.5, 1, 1);
+    });
+
+    // Other Players (Use interpolated for smoothness)
+    (Object.values(interpolatedPlayersRef.current) as PlayerSession[]).forEach(p => {
+      if (!p || !p.segments || p.segments.length === 0) return;
+      const head = p.segments[0];
+      ctx.fillStyle = p.color1 || '#ff3333';
+      ctx.beginPath();
+      ctx.arc(head.x * scaleX, head.y * scaleY, 2, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // Local Player
+    if (isAlive) {
+      const head = playerRef.current.segments[0];
+      ctx.fillStyle = '#fff';
+      
+      // Glow effect for local player
+      ctx.shadowBlur = 8;
+      ctx.shadowColor = playerRef.current.color1 || '#22ff44';
+      
+      ctx.beginPath();
+      ctx.arc(head.x * scaleX, head.y * scaleY, 3, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // Outer ring for local player
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(head.x * scaleX, head.y * scaleY, 5 + Math.sin(Date.now() / 200) * 2, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.restore();
   };
 
   const drawSnake = (ctx: CanvasRenderingContext2D, snake: PlayerSession) => {
@@ -1036,7 +1252,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       ctx.globalAlpha = 0.5;
     }
 
-    const pointsPerSegment = 3; // Closer segments for natural look
+    const pointsPerSegment = 3.75; // Reducción de densidad del 20% (3 / 0.8)
     const baseRadius = 10; // Fixed radius for body
     const headRadius = 14; // Fixed radius for head
 
@@ -1110,7 +1326,8 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     ctx.shadowColor = snake.isBoosting ? '#fff' : snake.color1;
 
     for (let i = trail.length - 1; i >= pointsPerSegment; i -= pointsPerSegment) {
-      const segmentIndex = Math.floor(i / pointsPerSegment);
+      const idx = Math.floor(i);
+      const segmentIndex = Math.floor(idx / pointsPerSegment);
       
       // Constant thickness (no tapering)
       const r = baseRadius;
@@ -1123,7 +1340,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
           ctx.shadowBlur = 5;
           ctx.fillStyle = '#fff';
           ctx.beginPath();
-          ctx.arc(trail[i].x + (Math.random() - 0.5) * r * 3, trail[i].y + (Math.random() - 0.5) * r * 3, 2, 0, Math.PI * 2);
+          ctx.arc(trail[idx].x + (Math.random() - 0.5) * r * 3, trail[idx].y + (Math.random() - 0.5) * r * 3, 2, 0, Math.PI * 2);
           ctx.fill();
           ctx.restore();
         }
@@ -1132,7 +1349,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       }
 
       ctx.beginPath();
-      ctx.arc(trail[i].x, trail[i].y, r, 0, Math.PI * 2);
+      ctx.arc(trail[idx].x, trail[idx].y, r, 0, Math.PI * 2);
       ctx.fill();
     }
     const head = trail[0];
@@ -1350,74 +1567,96 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-md"
+            className="absolute inset-0 z-[110] flex items-center justify-center bg-black/80 backdrop-blur-xl"
           >
-            {category.startsWith('private_') && competitionStats ? (
+            {category.startsWith('private_') ? (
               <motion.div
                 initial={{ scale: 0.9, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
-                className="w-full max-w-md rounded-[40px] bg-gradient-to-b from-red-900/40 to-black/90 p-10 text-center border border-red-500/30 shadow-2xl"
+                className="w-full max-w-sm rounded-[40px] bg-gradient-to-b from-red-900/40 to-black/95 p-8 text-center border border-red-500/30 shadow-2xl"
               >
                 <div className="mb-6 flex flex-col items-center gap-2">
-                  <div className="rounded-full bg-red-500/20 p-4">
+                  <div className="rounded-full bg-red-500/20 p-4 mb-2">
                     <X size={48} className="text-red-500" />
                   </div>
-                  <h2 className="text-4xl font-black text-white uppercase italic tracking-tighter">¡DERROTA!</h2>
-                  <p className="text-sm font-bold text-red-400 uppercase tracking-widest">Estadísticas de Competencia</p>
+                  <h2 className="text-4xl font-black text-white uppercase italic tracking-tighter">¡ELIMINADO!</h2>
+                  <p className="text-xs font-bold text-red-400 uppercase tracking-widest">Estadísticas de Rivalidad</p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4 mb-8">
-                  <div className="rounded-2xl bg-white/5 p-4 border border-white/10">
-                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Duelos Ganados</p>
-                    <p className="text-2xl font-black text-white">{competitionStats.wins}</p>
+                <div className="grid grid-cols-2 gap-4 mb-6">
+                  <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
+                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Victorias</p>
+                    <p className="text-3xl font-black text-white italic">{competitionStats?.wins || 0}</p>
                   </div>
-                  <div className="rounded-2xl bg-white/5 p-4 border border-white/10">
-                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Duelos Perdidos</p>
-                    <p className="text-2xl font-black text-red-500">{competitionStats.losses}</p>
-                  </div>
-                  <div className="rounded-2xl bg-white/5 p-4 border border-white/10">
-                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Monedas Ganadas</p>
-                    <p className="text-xl font-black text-green-400">+{competitionStats.coinsWon}</p>
-                  </div>
-                  <div className="rounded-2xl bg-white/5 p-4 border border-white/10">
-                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Monedas Perdidas</p>
-                    <p className="text-xl font-black text-red-400">-{competitionStats.coinsLost}</p>
+                  <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
+                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Derrotas</p>
+                    <div className="flex flex-col items-center">
+                      <p className="text-3xl font-black text-red-500 italic">{(competitionStats?.losses || 0)}</p>
+                      <motion.span 
+                        initial={{ opacity: 0, y: 5 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="text-[10px] font-black text-red-400 bg-red-400/10 px-2 py-0.5 rounded-full"
+                      >
+                        +1 DERROTA
+                      </motion.span>
+                    </div>
                   </div>
                 </div>
 
-                <div className="mb-8 rounded-2xl bg-white/5 p-4 border border-white/10">
-                  <p className="text-[10px] font-bold text-gray-500 uppercase mb-2">Efectividad contra {opponentInfo?.name}</p>
-                  <div className="h-3 w-full rounded-full bg-gray-800 overflow-hidden">
+                <div className="mb-6 rounded-2xl bg-white/5 p-4 border border-white/5 text-left">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[10px] font-black text-gray-500 uppercase">Apuesta Perdida</p>
+                    <div className="flex items-center gap-1">
+                      <Coins size={12} className="text-red-400" />
+                      <span className="text-sm font-black text-red-400">-{Math.floor(wager)}</span>
+                    </div>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-gray-800 overflow-hidden">
                     <div 
-                      className="h-full bg-green-500 transition-all duration-1000"
-                      style={{ width: `${(competitionStats.wins / (competitionStats.wins + competitionStats.losses || 1)) * 100}%` }}
+                      className="h-full bg-red-500 transition-all duration-1000"
+                      style={{ width: `${((competitionStats?.losses || 0) / ((competitionStats?.wins || 0) + (competitionStats?.losses || 0) || 1)) * 100}%` }}
                     />
-                  </div>
-                  <div className="flex justify-between mt-2">
-                    <span className="text-[10px] font-black text-green-400">
-                      {Math.round((competitionStats.wins / (competitionStats.wins + competitionStats.losses || 1)) * 100)}% ÉXITO
-                    </span>
-                    <span className="text-[10px] font-black text-red-400">
-                      {Math.round((competitionStats.losses / (competitionStats.wins + competitionStats.losses || 1)) * 100)}% FRACASO
-                    </span>
                   </div>
                 </div>
 
                 <button
-                  onClick={onGameOver}
-                  className="w-full rounded-full bg-white py-4 text-xl font-black uppercase tracking-tighter text-black transition-all hover:scale-105 active:scale-95"
+                  onClick={() => {
+                    if (opponentInfo?.id && onReturnToRival) {
+                      onReturnToRival(opponentInfo.id);
+                    } else {
+                      onGameOver();
+                    }
+                  }}
+                  className="w-full rounded-2xl bg-white py-4 text-lg font-black uppercase tracking-tighter text-black transition-all hover:scale-105 active:scale-95 shadow-lg shadow-white/10"
                 >
-                  Continuar
+                  Aceptar
                 </button>
               </motion.div>
             ) : (
               <div className="text-center">
-                <h2 className="mb-4 text-6xl font-black text-red-500 italic">¡ELIMINADO!</h2>
-                <p className="text-2xl text-white">
-                  {category.startsWith('private_') 
-                    ? `Has perdido ${Math.floor(wager)} monedas en el duelo` 
-                    : 'Has perdido tu apuesta'}
-                </p>
+                <motion.div
+                  initial={{ scale: 0.5, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  className="mb-4 inline-block rounded-full bg-red-500/20 p-6"
+                >
+                  <X size={64} className="text-red-500" />
+                </motion.div>
+                <h2 className="mb-4 text-7xl font-black text-red-500 italic tracking-tighter">¡ELIMINADO!</h2>
+                <div className="flex flex-col items-center gap-2">
+                  <p className="text-xl font-bold text-white uppercase tracking-widest">
+                    Has perdido tu apuesta
+                  </p>
+                  <div className="flex items-center gap-2 rounded-full bg-red-500/10 px-4 py-1 border border-red-500/20">
+                    <Coins size={16} className="text-red-400" />
+                    <span className="text-lg font-black text-red-400">-{Math.floor(wager)}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={onGameOver}
+                  className="mt-8 rounded-full bg-white px-8 py-3 font-bold text-black"
+                >
+                  Continuar
+                </button>
               </div>
             )}
           </motion.div>
@@ -1429,108 +1668,133 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
             animate={{ opacity: 1 }}
             className="absolute inset-0 z-[110] flex items-center justify-center bg-black/80 backdrop-blur-xl"
           >
-            {category.startsWith('private_') && competitionStats ? (
+            {category.startsWith('private_') ? (
               <motion.div
                 initial={{ scale: 0.9, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
-                className="w-full max-w-md rounded-[40px] bg-gradient-to-b from-yellow-500/20 to-black/90 p-10 text-center border border-yellow-500/30 shadow-2xl"
+                className="w-full max-sm:w-[90%] max-w-sm rounded-[40px] bg-gradient-to-b from-green-900/40 to-black/95 p-8 text-center border border-green-500/30 shadow-2xl"
               >
                 <div className="mb-6 flex flex-col items-center gap-2">
-                  <div className="rounded-full bg-yellow-500 p-4 text-black">
+                  <motion.div 
+                    animate={{ rotate: [0, -10, 10, -10, 10, 0] }}
+                    transition={{ duration: 0.5, delay: 0.2 }}
+                    className="rounded-full bg-green-500 p-5 text-black mb-2 shadow-[0_0_30px_rgba(34,197,94,0.4)]"
+                  >
                     <Trophy size={48} />
-                  </div>
-                  <h2 className="text-4xl font-black text-white uppercase italic tracking-tighter">¡VICTORIA!</h2>
-                  <p className="text-sm font-bold text-yellow-500 uppercase tracking-widest">Estadísticas de Competencia</p>
+                  </motion.div>
+                  <h2 className="text-4xl font-black text-white uppercase italic tracking-tighter">¡FELICITACIONES!</h2>
+                  <p className="text-xs font-bold text-green-400 uppercase tracking-widest">Estadísticas de Rivalidad</p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4 mb-8">
-                  <div className="rounded-2xl bg-white/5 p-4 border border-white/10">
-                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Duelos Ganados</p>
-                    <p className="text-2xl font-black text-green-400">{competitionStats.wins}</p>
+                <div className="grid grid-cols-2 gap-4 mb-6">
+                  <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
+                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Victorias</p>
+                    <div className="flex flex-col items-center">
+                      <p className="text-3xl font-black text-green-400 italic">{competitionStats?.wins || 0}</p>
+                      <AnimatePresence>
+                        {showNewWinAnim && (
+                          <motion.span 
+                            initial={{ opacity: 0, y: 10, scale: 0.5 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            className="text-[10px] font-black text-green-400 bg-green-400/10 px-2 py-0.5 rounded-full"
+                          >
+                            +1 VICTORIA
+                          </motion.span>
+                        )}
+                      </AnimatePresence>
+                    </div>
                   </div>
-                  <div className="rounded-2xl bg-white/5 p-4 border border-white/10">
-                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Duelos Perdidos</p>
-                    <p className="text-2xl font-black text-white">{competitionStats.losses}</p>
-                  </div>
-                  <div className="rounded-2xl bg-white/5 p-4 border border-white/10">
-                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Monedas Ganadas</p>
-                    <p className="text-xl font-black text-green-400">+{competitionStats.coinsWon}</p>
-                  </div>
-                  <div className="rounded-2xl bg-white/5 p-4 border border-white/10">
-                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Monedas Perdidas</p>
-                    <p className="text-xl font-black text-red-400">-{competitionStats.coinsLost}</p>
+                  <div className="rounded-2xl bg-white/5 p-4 border border-white/5">
+                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Derrotas</p>
+                    <p className="text-3xl font-black text-white italic">{competitionStats?.losses || 0}</p>
                   </div>
                 </div>
 
-                <div className="mb-8 rounded-2xl bg-white/5 p-4 border border-white/10">
-                  <p className="text-[10px] font-bold text-gray-500 uppercase mb-2">Efectividad contra {opponentInfo?.name}</p>
-                  <div className="h-3 w-full rounded-full bg-gray-800 overflow-hidden">
+                <div className="mb-6 rounded-2xl bg-white/5 p-4 border border-white/5 text-left">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[10px] font-black text-gray-500 uppercase">Apuesta Ganada</p>
+                    <div className="flex items-center gap-1">
+                      <Coins size={12} className="text-yellow-400" />
+                      <span className="text-sm font-black text-green-400">+{Math.floor(wager)}</span>
+                    </div>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-gray-800 overflow-hidden">
                     <div 
                       className="h-full bg-green-500 transition-all duration-1000"
-                      style={{ width: `${(competitionStats.wins / (competitionStats.wins + competitionStats.losses || 1)) * 100}%` }}
+                      style={{ width: `${((competitionStats?.wins || 0) / ((competitionStats?.wins || 0) + (competitionStats?.losses || 0) || 1)) * 100}%` }}
                     />
-                  </div>
-                  <div className="flex justify-between mt-2">
-                    <span className="text-[10px] font-black text-green-400">
-                      {Math.round((competitionStats.wins / (competitionStats.wins + competitionStats.losses || 1)) * 100)}% ÉXITO
-                    </span>
-                    <span className="text-[10px] font-black text-red-400">
-                      {Math.round((competitionStats.losses / (competitionStats.wins + competitionStats.losses || 1)) * 100)}% FRACASO
-                    </span>
                   </div>
                 </div>
 
+                <div className="flex flex-col gap-3">
+                  {rematchStatus === 'none' && (
+                    <button
+                      onClick={handleRematchRequest}
+                      disabled={user.monedas < wager}
+                      className="w-full rounded-2xl bg-yellow-500 py-4 text-xl font-black uppercase tracking-tighter text-black transition-all hover:scale-105 active:scale-95 disabled:opacity-50 disabled:grayscale shadow-lg shadow-yellow-500/20"
+                    >
+                      {user.monedas < wager ? 'Saldo Insuficiente' : 'Pedir Revancha'}
+                    </button>
+                  )}
+                  
+                  {rematchStatus === 'sending' && (
+                    <div className="w-full rounded-2xl bg-white/10 py-4 text-lg font-black uppercase tracking-tighter text-white animate-pulse border border-white/10">
+                      Enviando...
+                    </div>
+                  )}
+                  
+                  {rematchStatus === 'waiting' && (
+                    <div className="w-full rounded-2xl bg-blue-500/20 py-4 text-lg font-black uppercase tracking-tighter text-blue-400 border border-blue-500/30">
+                      Esperando respuesta...
+                    </div>
+                  )}
+                  
+                  {rematchStatus === 'rejected' && (
+                    <div className="w-full rounded-2xl bg-red-500/20 py-4 text-lg font-black uppercase tracking-tighter text-red-500 border border-red-500/30">
+                      Revancha Rechazada
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => {
+                      if (opponentInfo?.id && onReturnToRival) {
+                        onReturnToRival(opponentInfo.id);
+                      } else {
+                        onGameOver();
+                      }
+                    }}
+                    className="w-full rounded-2xl bg-white py-4 text-lg font-black uppercase tracking-tighter text-black transition-all hover:scale-105 active:scale-95 shadow-lg shadow-white/10"
+                  >
+                    Aceptar
+                  </button>
+                </div>
+              </motion.div>
+            ) : (
+              <div className="text-center">
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+                  className="mb-8 inline-block rounded-full bg-yellow-500 p-8 shadow-2xl shadow-yellow-500/40"
+                >
+                  <Trophy size={64} className="text-black" />
+                </motion.div>
+                <h2 className="mb-4 text-7xl font-black text-yellow-500 italic tracking-tighter">¡VICTORIA!</h2>
+                <div className="flex flex-col items-center gap-2">
+                  <p className="text-xl font-bold text-white uppercase tracking-widest">
+                    Has recolectado
+                  </p>
+                  <div className="flex items-center gap-2 rounded-full bg-yellow-500/20 px-6 py-2 border border-yellow-500/30">
+                    <Coins size={20} className="text-yellow-400" />
+                    <span className="text-3xl font-black text-yellow-400">+{Math.floor(playerRef.current.wager)}</span>
+                  </div>
+                </div>
                 <button
                   onClick={onGameOver}
-                  className="w-full rounded-full bg-white py-4 text-xl font-black uppercase tracking-tighter text-black transition-all hover:scale-105 active:scale-95"
+                  className="mt-12 rounded-full bg-white px-12 py-4 text-xl font-black uppercase tracking-tighter text-black transition-all hover:scale-110 active:scale-95"
                 >
                   Continuar
                 </button>
-              </motion.div>
-            ) : (
-              <motion.div
-                initial={{ scale: 0.8, y: 20 }}
-                animate={{ scale: 1, y: 0 }}
-                className="flex flex-col items-center gap-6 rounded-[40px] bg-gradient-to-b from-yellow-500/20 to-black/80 p-12 text-center border border-yellow-500/30 shadow-[0_0_100px_rgba(234,179,8,0.2)]"
-              >
-                <motion.div
-                  animate={{ 
-                    rotateY: [0, 360],
-                    scale: [1, 1.1, 1]
-                  }}
-                  transition={{ duration: 3, repeat: Infinity }}
-                  className="rounded-full bg-yellow-500 p-6 text-black shadow-[0_0_30px_rgba(234,179,8,0.5)]"
-                >
-                  <Trophy size={64} />
-                </motion.div>
-                
-                <div className="space-y-2">
-                  <h2 className="text-6xl font-black text-white uppercase italic tracking-tighter">
-                    ¡FELICITACIONES!
-                  </h2>
-                  <p className="text-2xl font-bold text-yellow-500 uppercase tracking-widest">
-                    Eres el Ganador del Duelo
-                  </p>
-                </div>
-
-                <div className="flex flex-col items-center gap-2 rounded-3xl bg-white/5 px-12 py-8 border border-white/10">
-                  <span className="text-sm font-bold text-gray-400 uppercase tracking-widest">Ganancia Total</span>
-                  <div className="flex items-center gap-4 text-7xl font-black text-yellow-500">
-                    <Coins size={60} />
-                    <span>{Math.floor(playerRef.current.wager)}</span>
-                  </div>
-                  <p className="mt-2 text-xs font-bold text-green-400 uppercase tracking-widest">Monedas acreditadas</p>
-                </div>
-
-                <button
-                  onClick={onGameOver}
-                  className="group relative mt-4 flex items-center gap-3 overflow-hidden rounded-full bg-white px-12 py-5 text-2xl font-black uppercase tracking-tighter text-black transition-all hover:scale-105 active:scale-95"
-                >
-                  <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-yellow-500/20 to-transparent transition-transform duration-500 group-hover:translate-x-full" />
-                  <span>Aceptar</span>
-                  <ArrowLeft className="rotate-180" />
-                </button>
-              </motion.div>
+              </div>
             )}
           </motion.div>
         )}
@@ -1651,3 +1915,10 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     </div>
   );
 }
+
+const hexToRgba = (hex: string, alpha: number) => {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};

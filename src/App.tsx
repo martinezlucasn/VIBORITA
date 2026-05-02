@@ -11,7 +11,20 @@ import Arena from './components/Arena';
 import TrainingArena from './components/TrainingArena';
 import WagerArena from './components/WagerArena';
 import { motion, AnimatePresence } from 'motion/react';
-import { LogIn, Loader2, ShieldCheck, X } from 'lucide-react';
+import { LogIn, Loader2, ShieldCheck, X, Download, AlertCircle } from 'lucide-react';
+import { soundManager } from './lib/sounds';
+
+const APP_VERSION = '1.0.0';
+
+function compareVersions(v1: string, v2: string) {
+  const parts1 = v1.split('.').map(Number);
+  const parts2 = v2.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (parts1[i] > (parts2[i] || 0)) return 1;
+    if (parts1[i] < (parts2[i] || 0)) return -1;
+  }
+  return 0;
+}
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -21,10 +34,34 @@ export default function App() {
   const [growthWager, setGrowthWager] = useState(0);
   const [wagerCategory, setWagerCategory] = useState<string>('basica');
   const [botCount, setBotCount] = useState(1);
+  const [trainingWager, setTrainingWager] = useState(0);
+  const [lastRivalId, setLastRivalId] = useState<string | null>(null);
   const [quotaExceeded, setQuotaExceeded] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
   const [fbReady, setFbReady] = useState(false);
+  const [needsUpdate, setNeedsUpdate] = useState(false);
+  const [appConfig, setAppConfig] = useState<any>(null);
+
+  useEffect(() => {
+    // Version check
+    const checkVersion = async () => {
+      try {
+        const configSnap = await getDoc(doc(db, 'app_config', 'current'));
+        if (configSnap.exists()) {
+          const config = configSnap.data();
+          setAppConfig(config);
+          const minVersion = config.minVersion || '0.0.0';
+          if (compareVersions(APP_VERSION, minVersion) < 0) {
+            setNeedsUpdate(true);
+          }
+        }
+      } catch (err) {
+        console.error('Error checking app version:', err);
+      }
+    };
+    checkVersion();
+  }, []);
 
   useEffect(() => {
     const checkFB = () => {
@@ -222,11 +259,21 @@ export default function App() {
   const handleGameOver = () => {
     setWager(0);
     setBotCount(1);
+    setTrainingWager(0);
     setGameState('menu');
   };
 
-  const handleStartTraining = (count: number = 1) => {
+  const handleReturnToRival = (rivalId: string) => {
+    setWager(0);
+    setBotCount(1);
+    setTrainingWager(0);
+    setLastRivalId(rivalId);
+    setGameState('menu');
+  };
+
+  const handleStartTraining = (count: number = 1, wager: number = 0) => {
     setBotCount(count);
+    setTrainingWager(wager);
     setGameState('training');
   };
 
@@ -248,6 +295,46 @@ export default function App() {
     setWagerCategory(category);
     setGameState('wager');
   };
+
+  if (needsUpdate) {
+    return (
+      <div className="flex h-screen w-screen flex-col items-center justify-center bg-[#05070a] p-8 text-center text-white">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="max-w-md"
+        >
+          <div className="mx-auto mb-8 flex h-24 w-24 items-center justify-center rounded-3xl bg-red-600/20 text-red-500 shadow-[0_0_30px_rgba(220,38,38,0.2)]">
+            <AlertCircle size={48} />
+          </div>
+          
+          <h1 className="mb-4 text-4xl font-black uppercase tracking-tighter italic">Actualización Obligatoria</h1>
+          <p className="mb-8 text-gray-400 font-bold uppercase tracking-widest text-[10px]">
+            Tu versión actual (<span className="text-white">{APP_VERSION}</span>) ya no es compatible. 
+            Por favor descarga la última versión para seguir jugando.
+          </p>
+
+          {appConfig?.updateMessage && (
+            <div className="mb-8 rounded-2xl bg-white/5 p-4 border border-white/10 italic text-sm text-gray-300">
+              "{appConfig.updateMessage}"
+            </div>
+          )}
+
+          <a
+            href={appConfig?.downloadUrl || '#'}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex w-full items-center justify-center gap-3 rounded-2xl bg-blue-600 py-5 text-lg font-black uppercase tracking-widest text-white shadow-xl shadow-blue-600/20 transition-all hover:bg-blue-500 hover:scale-105 active:scale-95"
+          >
+            <Download size={24} />
+            Descargar APK v{appConfig?.version || 'Latest'}
+          </a>
+          
+          <p className="mt-8 text-[8px] font-mono text-gray-700 uppercase tracking-[0.4em]">Viborita 1.0.0 - Bonus Arg.</p>
+        </motion.div>
+      </div>
+    );
+  }
 
   if (loading || !fbReady) {
     return (
@@ -470,6 +557,8 @@ export default function App() {
               onStartGame={handleStartGame} 
               onStartTraining={handleStartTraining}
               onStartWager={handleStartWager}
+              initialRivalId={lastRivalId}
+              onRivalHandled={() => setLastRivalId(null)}
             />
           </motion.div>
         ) : gameState === 'playing' ? (
@@ -490,7 +579,7 @@ export default function App() {
             exit={{ opacity: 0 }}
             className="h-full w-full"
           >
-            <TrainingArena user={user} botCount={botCount} onGameOver={handleGameOver} />
+            <TrainingArena user={user} botCount={botCount} initialWager={trainingWager} onGameOver={handleGameOver} />
           </motion.div>
         ) : (
           <motion.div
@@ -500,7 +589,15 @@ export default function App() {
             exit={{ opacity: 0 }}
             className="h-full w-full"
           >
-            <WagerArena user={user} wager={wager} growthWager={growthWager} category={wagerCategory} onGameOver={handleGameOver} />
+            <WagerArena 
+              user={user} 
+              wager={wager} 
+              growthWager={growthWager} 
+              category={wagerCategory} 
+              onGameOver={handleGameOver}
+              onReturnToRival={handleReturnToRival}
+              onStartWager={handleStartWager}
+            />
           </motion.div>
         )}
       </AnimatePresence>

@@ -17,7 +17,16 @@
         "millonarioAccessUntil": { "type": "number" },
         "inventoryItems": { "type": "object" },
         "inventoryAbilities": { "type": "object" },
-        "equippedAbilities": { "type": "array", "items": { "type": "string" } }
+        "equippedAbilities": { "type": "array", "items": { "type": "string" } },
+        "lastDailyRewardClaim": { "type": "number" },
+        "dailyRewardsCycle": { "type": "number" },
+        "claimedPlatinumReward": { "type": "boolean" },
+        "bio": { "type": "string" },
+        "profileTheme": { "type": "string" },
+        "profileBorder": { "type": "string" },
+        "unlockedThemes": { "type": "array", "items": { "type": "string" } },
+        "unlockedBorders": { "type": "array", "items": { "type": "string" } },
+        "trophies": { "type": "number" }
       },
       "required": ["displayName", "coins"]
     },
@@ -130,6 +139,9 @@
         "status": { "type": "string", "enum": ["pending", "accepted"] },
         "requesterId": { "type": "string" },
         "gamesPlayed": { "type": "number" },
+        "level": { "type": "number" },
+        "exp": { "type": "number" },
+        "lastInteractionTime": { "type": "number" },
         "stats": { 
           "type": "object",
           "additionalProperties": {
@@ -142,6 +154,18 @@
         "timestamp": { "type": "number" }
       },
       "required": ["uids", "status", "requesterId", "gamesPlayed", "timestamp"]
+    },
+    "PrivateMessage": {
+      "title": "PrivateMessage",
+      "description": "Messages between friends",
+      "type": "object",
+      "properties": {
+        "friendshipId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "text": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["friendshipId", "senderId", "text", "timestamp"]
     },
     "Notification": {
       "title": "Notification",
@@ -199,9 +223,25 @@
         "status": { "type": "string", "enum": ["active", "sold"] }
       },
       "required": ["sellerId", "sellerName", "abilityId", "price", "timestamp", "status"]
+    },
+    "AppConfig": {
+      "title": "AppConfig",
+      "description": "Global application configuration for updates",
+      "type": "object",
+      "properties": {
+        "version": { "type": "string" },
+        "minVersion": { "type": "string" },
+        "downloadUrl": { "type": "string" },
+        "updateMessage": { "type": "string" }
+      },
+      "required": ["version", "minVersion", "downloadUrl"]
     }
   },
   "firestore": {
+    "/app_config/{configId}": {
+      "schema": "AppConfig",
+      "description": "Global app configuration documents"
+    },
     "/users/{userId}": {
       "schema": "User",
       "description": "User profiles"
@@ -237,6 +277,10 @@
     "/friendships/{friendshipId}": {
       "schema": "Friendship",
       "description": "Friendships and friend requests"
+    },
+    "/privateMessages/{messageId}": {
+      "schema": "PrivateMessage",
+      "description": "Messages between friends"
     },
     "/notifications/{notificationId}": {
       "schema": "Notification",

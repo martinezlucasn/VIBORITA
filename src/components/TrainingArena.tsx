@@ -15,10 +15,11 @@ import { supabase } from '../lib/supabase';
 interface TrainingArenaProps {
   user: User;
   botCount?: number;
+  initialWager?: number;
   onGameOver: () => void;
 }
 
-export default function TrainingArena({ user, botCount = 1, onGameOver }: TrainingArenaProps) {
+export default function TrainingArena({ user, botCount = 1, initialWager = 0, onGameOver }: TrainingArenaProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [score, setScore] = useState(0);
   const [isAlive, setIsAlive] = useState(true);
@@ -91,9 +92,9 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     id: 'player',
     userId: user.id,
     displayName: user.displayName,
-    segments: Array.from({ length: 12 }, (_, i) => ({ x: WORLD_W / 2 - i * SEGMENT_DISTANCE, y: WORLD_H / 2 })),
+    segments: Array.from({ length: 12 + Math.floor(initialWager / 10) }, (_, i) => ({ x: WORLD_W / 2 - i * SEGMENT_DISTANCE, y: WORLD_H / 2 })),
     angle: 0,
-    wager: 0,
+    wager: initialWager,
     isAlive: true,
     lastUpdate: Date.now(),
     spawnTime: Date.now(),
@@ -262,7 +263,8 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     }
 
     if (isBoosting && !isStopped) {
-      setScore(s => Math.max(0, s - 0.2 * dt * 60));
+      playerRef.current.wager = Math.max(0, playerRef.current.wager - 0.2 * dt * 60);
+      setScore(Math.floor(playerRef.current.wager));
     }
     const newX = head.x + Math.cos(playerRef.current.angle) * speed * dt;
     const newY = head.y + Math.sin(playerRef.current.angle) * speed * dt;
@@ -279,10 +281,22 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
       trail.unshift({ x: newX, y: newY });
     }
 
-    // Growth logic: starting size (12 base segments) + 1 segment every 7 points collected
+    // Growth logic: starting size (12 base segments) + scaling segments
     const pointsPerSegment = 5;
     const baseSegments = 12;
-    const targetSegments = baseSegments + Math.floor(score / 7);
+    const currentScore = playerRef.current.wager;
+    
+    // Multi-stage linear growth: 
+    // - Up to 3000 points: 1 segment per 50 points (60 segments)
+    // - After 3000 points: 1 segment per 150 points
+    let bonusSegments = 0;
+    if (currentScore <= 3000) {
+      bonusSegments = Math.floor(currentScore / 50);
+    } else {
+      bonusSegments = 60 + Math.floor((currentScore - 3000) / 150);
+    }
+    
+    const targetSegments = baseSegments + bonusSegments;
     const maxTrailLen = targetSegments * pointsPerSegment;
 
     if (speed > 0) {
@@ -295,8 +309,8 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     cameraRef.current.x += (head.x - cameraRef.current.x) * 0.1;
     cameraRef.current.y += (head.y - cameraRef.current.y) * 0.1;
 
-    // Dynamic zoom
-    let targetZoomBase = Math.max(0.35, Math.min(1, 1200 / (maxTrailLen * 2 + 800)));
+    // Dynamic zoom: Stay closer
+    let targetZoomBase = Math.max(0.5, Math.min(1.1, 1600 / (maxTrailLen * 1.2 + 800)));
     if (hasZoom) targetZoomBase *= 0.65;
     cameraRef.current.zoom += (targetZoomBase - cameraRef.current.zoom) * 0.02;
 
@@ -327,18 +341,43 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
       id: `bot-${index}-${Math.random().toString(36).substr(2, 5)}`,
       userId: `bot-${index}`,
       displayName: `${randomName} ${Math.random() > 0.7 ? Math.floor(Math.random() * 99) : ''}`.trim(),
-      segments: Array.from({ length: 15 }, (_, j) => ({ 
+      segments: Array.from({ length: 10 }, (_, j) => ({ 
         x: startX - j * SEGMENT_DISTANCE, 
         y: startY 
       })),
       angle: Math.random() * Math.PI * 2,
-      wager: 0,
+      wager: 100,
       isAlive: true,
       lastUpdate: Date.now(),
       spawnTime: Date.now(),
       color1: index % 2 === 0 ? '#ff4422' : '#ff8822',
       color2: index % 2 === 0 ? '#cc3311' : '#cc6611',
     };
+  };
+
+  const dropBotFood = (bot: PlayerSession) => {
+    const segments = bot.segments;
+    const pointsPerSegment = 5; // Defined in updateBot too
+    
+    // REDUCTION FOR LAG: Half visual points and half value compared to previous (before it was wager/20)
+    // Doubled for bots as per request
+    const dropCount = Math.max(2, Math.floor(bot.wager / 20));
+    const dropFrequency = pointsPerSegment * 4;
+
+    for (let i = 0; i < dropCount; i++) {
+      const idx = i * dropFrequency;
+      const s = segments[idx] || segments[segments.length - 1];
+      const val = 1; // Maintaining small value for lag reduction
+      
+      foodsRef.current.push({
+        id: Math.random().toString(),
+        x: s.x,
+        y: s.y,
+        value: val,
+        type: 'normal',
+        color: bot.color1
+      });
+    }
   };
 
   const updateBot = (bot: PlayerSession, dt: number) => {
@@ -373,29 +412,17 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     if (newX < 0 || newX > WORLD_W || newY < 0 || newY > WORLD_H) {
       bot.isAlive = false;
       // Drop food
-      const segments = bot.segments;
-      const dropFrequency = 5;
-      for (let i = 0; i < segments.length; i += dropFrequency) {
-        const s = segments[i];
-        foodsRef.current.push({
-          id: Math.random().toString(),
-          x: s.x,
-          y: s.y,
-          value: dropFrequency, // 1 point per segment
-          type: 'normal',
-          color: bot.color1
-        });
-      }
+      dropBotFood(bot);
       return;
     }
 
     const trail = bot.segments;
     trail.unshift({ x: newX, y: newY });
 
-    // Bot growth follows the 1/7 rule too
+    // Bot growth: 10 base segments (100 pts) + 1 per 10 points
     const pointsPerSegment = 5;
-    const baseSegments = 12;
-    const targetSegments = baseSegments + Math.floor(bot.wager / 7);
+    const botScore = Math.min(5000, bot.wager); // Increased limit as they start bigger
+    const targetSegments = Math.floor(botScore / 10);
     const maxTrailLen = targetSegments * pointsPerSegment;
 
     while (trail.length > maxTrailLen) {
@@ -437,7 +464,7 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
         const botHead = bot.segments[0];
         const dBot = Math.sqrt((botHead.x - f.x) ** 2 + (botHead.y - f.y) ** 2);
         if (dBot < CELL) {
-          bot.wager += f.value;
+          bot.wager = Math.min(3000, bot.wager + f.value);
           return false;
         }
       }
@@ -445,7 +472,8 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     });
 
     if (scoreGain > 0) {
-      setScore(s => s + scoreGain);
+      playerRef.current.wager += scoreGain;
+      setScore(Math.floor(playerRef.current.wager));
     }
     
     // Player Arena Item collision
@@ -522,19 +550,7 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
             }
 
             // Drop food
-            const segments = bot.segments;
-            const dropFrequency = 5;
-            for (let i = 0; i < segments.length; i += dropFrequency) {
-              const s = segments[i];
-              foodsRef.current.push({
-                id: Math.random().toString(),
-                x: s.x,
-                y: s.y,
-                value: dropFrequency, // 1 point per segment
-                type: 'normal',
-                color: bot.color1
-              });
-            }
+            dropBotFood(bot);
           }
         });
       }
@@ -552,19 +568,7 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
             if (d < CELL) {
               bot.isAlive = false;
               // Drop food
-              const segments = bot.segments;
-              const dropFreq = 5;
-              for (let i = 0; i < segments.length; i += dropFreq) {
-                const s = segments[i];
-                foodsRef.current.push({
-                  id: Math.random().toString(),
-                  x: s.x,
-                  y: s.y,
-                  value: dropFreq, // 1 point per segment
-                  type: 'normal',
-                  color: bot.color1
-                });
-              }
+              dropBotFood(bot);
             }
           });
         });
@@ -588,7 +592,33 @@ export default function TrainingArena({ user, botCount = 1, onGameOver }: Traini
     soundManager.play('death');
     soundManager.stopBoost();
 
-    // Player drops NOTHING in Training/Points Mode
+    // Player drops score in training too - follow the same lag-reduction logic
+    const segments = playerRef.current.segments;
+    const totalWager = playerRef.current.wager;
+    
+    // Increased drop density for better feeling
+    const dropCount = Math.max(15, Math.floor(totalWager / 10));
+    const dropFrequency = Math.max(1, Math.floor(segments.length / dropCount));
+
+    for (let i = 0; i < dropCount; i++) {
+        const idx = (i * dropFrequency) % segments.length;
+        const s = segments[idx] || segments[segments.length - 1];
+        
+        // Distribute value among drops
+        const val = Math.max(1, Math.floor(totalWager / dropCount));
+        
+        const offsetX = (Math.random() - 0.5) * 30;
+        const offsetY = (Math.random() - 0.5) * 30;
+
+        foodsRef.current.push({
+            id: Math.random().toString(),
+            x: s.x + offsetX,
+            y: s.y + offsetY,
+            value: val,
+            type: val >= 10 ? 'gold' : 'normal',
+            color: val >= 10 ? '#fbbf24' : playerRef.current.color1
+        });
+    }
   };
 
   const handleCollect = async () => {
