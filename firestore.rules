@@ -85,16 +85,16 @@ service cloud.firestore {
              data.timestamp is number;
     }
 
-    function isValidUser(data) {
-      let requiredFields = ['displayName', 'coins', 'lastActive'];
-      let optionalFields = ['id', 'email', 'ownedSkins', 'equippedSkin', 'highScore', 'highScoreMonedas', 'monedas', 'role', 'proAccessUntil', 'millonarioAccessUntil', 'usernameSet', 'botKills', 'insomniaCount', 'notifiedMedals', 'inventoryItems', 'inventoryAbilities', 'equippedAbilities', 'dailyRewardsCycle', 'lastDailyRewardClaim', 'lastActive', 'createdAt', 'updatedAt', 'lastLogin', 'bio', 'profileTheme', 'profileBorder', 'unlockedThemes', 'unlockedBorders', 'trophies', 'claimedPlatinumReward'];
+    function isValidUser(data, userId) {
+      let requiredFields = ['displayName', 'coins'];
+      let optionalFields = ['id', 'email', 'ownedSkins', 'equippedSkin', 'highScore', 'highScoreMonedas', 'monedas', 'role', 'proAccessUntil', 'millonarioAccessUntil', 'usernameSet', 'botKills', 'insomniaCount', 'notifiedMedals', 'inventoryItems', 'inventoryAbilities', 'equippedAbilities', 'dailyRewardsCycle', 'lastDailyRewardClaim', 'lastActive', 'createdAt', 'updatedAt', 'lastLogin', 'bio', 'profileTheme', 'profileBorder', 'unlockedThemes', 'unlockedBorders', 'trophies', 'claimedPlatinumReward', 'avatarConfig', 'isSuperAdmin'];
       return data.keys().hasAll(requiredFields) &&
              data.keys().hasOnly(requiredFields.concat(optionalFields)) &&
              data.displayName is string &&
+             data.displayName.size() <= 64 &&
              data.coins is number &&
              data.coins >= 0 &&
-             data.lastActive is number &&
-             (!('id' in data) || data.id is string) &&
+             (!('id' in data) || data.id == userId) &&
              (!('email' in data) || data.email is string) &&
              (!('monedas' in data) || data.monedas is number) &&
              (!('highScore' in data) || data.highScore is number) &&
@@ -113,12 +113,16 @@ service cloud.firestore {
              (!('equippedAbilities' in data) || data.equippedAbilities is list) &&
              (!('dailyRewardsCycle' in data) || data.dailyRewardsCycle is number) &&
              (!('lastDailyRewardClaim' in data) || data.lastDailyRewardClaim is number) &&
+             (!('lastActive' in data) || data.lastActive is number) &&
              (!('bio' in data) || data.bio is string) &&
              (!('profileTheme' in data) || data.profileTheme is string) &&
              (!('profileBorder' in data) || data.profileBorder is string) &&
              (!('unlockedThemes' in data) || data.unlockedThemes is list) &&
              (!('unlockedBorders' in data) || data.unlockedBorders is list) &&
-             (!('trophies' in data) || data.trophies is number) && (!('claimedPlatinumReward' in data) || data.claimedPlatinumReward is bool);
+             (!('trophies' in data) || data.trophies is number) && 
+             (!('claimedPlatinumReward' in data) || data.claimedPlatinumReward is bool) &&
+             (!('avatarConfig' in data) || data.avatarConfig is map) &&
+             (!('isSuperAdmin' in data) || data.isSuperAdmin is bool);
     }
 
     function isValidTicketPurchase(data) {
@@ -205,7 +209,8 @@ service cloud.firestore {
     }
 
     function isValidCompetitionStats(data) {
-      return data is map;
+      return data is map &&
+             data.keys().hasAll(['lastMatch']);
     }
 
     function isValidFriendship(data) {
@@ -235,14 +240,16 @@ service cloud.firestore {
 
     function isValidNotification(data) {
       return data.keys().hasAll(['type', 'fromId', 'fromName', 'toId', 'status', 'timestamp']) &&
-             data.type in ['game_invite'] &&
+             data.type in ['game_invite', 'rematch_invite'] &&
              data.fromId is string &&
              data.fromName is string &&
              data.toId is string &&
              data.status in ['pending', 'accepted', 'rejected'] &&
              data.timestamp is number &&
              (!('roomId' in data) || data.roomId is string) &&
-             (!('wager' in data) || data.wager is number);
+             (!('wager' in data) || data.wager is number) &&
+             (!('growthWager' in data) || data.growthWager is number) &&
+             (!('category' in data) || data.category is string);
     }
 
     function isValidWebhookLog(data) {
@@ -273,19 +280,29 @@ service cloud.firestore {
              (!('updateMessage' in data) || data.updateMessage is string);
     }
 
+    function isValidCTFRoom(data) {
+      return data.betAmount is number &&
+             data.status in ['waiting', 'playing', 'finished'];
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
 
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
     match /app_config/{configId} {
-      allow read: if true;
+      allow read, list: if true;
       allow write: if isAdmin();
     }
 
     match /users/{userId} {
       allow read: if isAuthenticated();
-      allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if (isOwner(userId) || isAdmin()) && isValidUser(request.resource.data);
+      allow create: if isOwner(userId) && isValidUser(request.resource.data, userId);
+      allow update: if (isOwner(userId) || isAdmin()) && isValidUser(request.resource.data, userId);
       allow delete: if isAdmin();
     }
 
@@ -399,7 +416,7 @@ service cloud.firestore {
 
     match /competitionStats/{statsId} {
       allow read: if isAuthenticated();
-      allow write: if isAuthenticated();
+      allow write: if isAuthenticated() && isValidCompetitionStats(request.resource.data);
     }
 
     match /webhook_logs/{logId} {
@@ -412,6 +429,11 @@ service cloud.firestore {
 
     match /payment_notifications/{notificationId} {
       allow read, write: if isAdmin();
+    }
+
+    match /ctf_rooms/{roomId} {
+      allow read, get, list: if isAuthenticated();
+      allow write: if isAdmin(); 
     }
   }
 }

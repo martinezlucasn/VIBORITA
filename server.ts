@@ -16,7 +16,6 @@ dotenv.config();
 // Initialize Firebase Admin
 const firebaseConfig = JSON.parse(fs.readFileSync('./firebase-applet-config.json', 'utf8'));
 const firebaseApp = admin.initializeApp({
-  credential: admin.credential.applicationDefault(),
   projectId: firebaseConfig.projectId,
 });
 
@@ -50,6 +49,7 @@ async function startServer() {
   // Game State
   interface Player {
     id: string;
+    userId?: string;
     roomId: string;
     displayName: string;
     segments: { x: number; y: number }[];
@@ -60,15 +60,44 @@ async function startServer() {
     color1?: string;
     color2?: string;
     skinEmoji?: string;
+    tailEmoji?: string;
     hasAura?: boolean;
     auraType?: string;
+    corner?: number;
+    hasFlag?: number | null;
+    isEliminated?: boolean;
+    isBoosting?: boolean;
   }
 
-  const rooms = new Map<string, { players: Map<string, Player>; bots: Player[]; mode?: 'points' | 'wager' }>();
+  const rooms = new Map<string, { 
+    players: Map<string, Player>; 
+    bots: Player[]; 
+    mode?: 'points' | 'wager' | 'ctf';
+    flags?: { x: number; y: number; carrierId: string | null; ownerCorner: number; active: boolean }[];
+    status?: 'waiting' | 'playing' | 'finished';
+    wager?: number;
+  }>();
+
+  function initCTFFlags() {
+    return [
+      { x: 100, y: 100, carrierId: null, ownerCorner: 0, active: false },
+      { x: WORLD_W - 100, y: 100, carrierId: null, ownerCorner: 1, active: false },
+      { x: 100, y: WORLD_H - 100, carrierId: null, ownerCorner: 2, active: false },
+      { x: WORLD_W - 100, y: WORLD_H - 100, carrierId: null, ownerCorner: 3, active: false }
+    ];
+  }
   const userSockets = new Map<string, string>(); // userId -> socketId
   const CELL = 24;
   const WORLD_W = 3000;
   const WORLD_H = 3000;
+
+  const CORNERS = [
+    { x: 100, y: 100, name: 'Rojo' },
+    { x: WORLD_W - 100, y: 100, name: 'Verde' },
+    { x: 100, y: WORLD_H - 100, name: 'Azul' },
+    { x: WORLD_W - 100, y: WORLD_H - 100, name: 'Blanco' }
+  ];
+  const COLORS = ['#ef4444', '#10b981', '#3b82f6', '#f8fafc']; // Red, Green, Blue, White
 
   // Mercado Pago Configuration
   const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || 'APP_USR-8338032777407473-041219-60a8de4c25c2273f599e7f4c30d48437-148608155';
@@ -604,9 +633,10 @@ async function startServer() {
         // Only maintain bots in non-private rooms
         const isPrivateRoom = roomId.startsWith('private_');
         const isWagerRoom = room.mode === 'wager';
+        const isCTFRoom = room.mode === 'ctf';
         
-        if (isPrivateRoom || isWagerRoom) {
-          // Clear any existing bots in private or wager rooms
+        if (isPrivateRoom || isWagerRoom || isCTFRoom) {
+          // Clear any existing bots in private, wager, or CTF rooms
           if (room.bots.length > 0) {
             room.bots.forEach(bot => {
               io.to(roomId).emit("player_left", { id: bot.id });
@@ -616,7 +646,7 @@ async function startServer() {
           continue;
         }
         
-        // Maintain 20 bots per room for common arenas (including wager)
+        // Maintain 20 bots per room for common arenas
         const targetBots = 20; 
         while (room.bots.length < targetBots) {
           const newBot = createServerBot(roomId, Math.random().toString(36).substr(2, 5));
@@ -729,25 +759,24 @@ async function startServer() {
             });
 
             // Drop food in Firestore for bot death (Server-side 1:1)
-            const dropFrequency = 5;
-            const collectionName = room.mode === 'wager' ? 'wagerCoins' : 'arenaFood';
+            // USER REQUEST: Remove random coins in global competition (wager mode)
+            // So we skip coin drops for bots in wager mode.
+            if (room.mode !== 'wager') {
+              const dropFrequency = 5;
+              const collectionName = 'arenaFood';
 
-            for (let i = 0; i < segments.length; i += dropFrequency) {
-              const seg = segments[i];
-              db.collection(collectionName).add({
-                x: seg.x,
-                y: seg.y,
-                value: dropFrequency, // 1 point per segment
-                serverId: roomId,
-                type: 'dropped',
-                color: (bot as any).color1 || '#ffffff',
-                timestamp: FieldValue.serverTimestamp(),
-                // Wager specific fields
-                ...(room.mode === 'wager' ? { 
-                  category: roomId.split('_')[0], 
-                  expiresAt: Date.now() + 4 * 60 * 1000 
-                } : {})
-              }).catch(() => {});
+              for (let i = 0; i < segments.length; i += dropFrequency) {
+                const seg = segments[i];
+                db.collection(collectionName).add({
+                  x: seg.x,
+                  y: seg.y,
+                  value: dropFrequency, 
+                  serverId: roomId,
+                  type: 'dropped',
+                  color: (bot as any).color1 || '#ffffff',
+                  timestamp: FieldValue.serverTimestamp(),
+                }).catch(() => {});
+              }
             }
             return;
           }
@@ -782,24 +811,79 @@ async function startServer() {
   io.on("connection", (socket) => {
     console.log(`User connected: ${socket.id}`);
 
-    socket.on("join_arena", (userData) => {
-      const roomId = userData.serverId || getAvailableRoom();
+    socket.on("join_arena", async (userData) => {
+      let roomId = userData.serverId;
+      
+      // Auto-assign CTF room if none provided
+      if (!roomId && userData.mode === 'ctf') {
+        for (const [rId, r] of rooms.entries()) {
+          if (r.mode === 'ctf' && r.wager === userData.wager && r.players.size < 4 && r.status === 'waiting') {
+            roomId = rId;
+            break;
+          }
+        }
+        
+        if (!roomId) {
+          roomId = `ctf_${Math.random().toString(36).substring(2, 10)}`;
+          const newRoom: any = {
+            id: roomId,
+            players: new Map(),
+            bots: [],
+            mode: 'ctf',
+            status: 'waiting',
+            wager: userData.wager || 0,
+            flags: initCTFFlags(),
+            createdAt: Date.now()
+          };
+          rooms.set(roomId, newRoom);
+          
+          // Basic persistence for room discovery
+          db.collection('ctf_rooms').doc(roomId).set({
+            betAmount: userData.wager || 0,
+            status: 'waiting',
+            createdAt: FieldValue.serverTimestamp()
+          }).catch(() => {});
+        }
+      } else if (!roomId) {
+        roomId = getAvailableRoom();
+      }
+
       let room = rooms.get(roomId);
+      if (!room) {
+        room = { 
+          players: new Map(), 
+          bots: [], 
+          mode: userData.mode || 'points',
+          status: 'waiting',
+          wager: userData.wager || 0
+        };
+        if (userData.mode === 'ctf') {
+          room.flags = initCTFFlags();
+        }
+        rooms.set(roomId, room);
+      }
       
       if (userData.id) {
         userSockets.set(userData.id, socket.id);
         (socket as any).userId = userData.id;
       }
-      
-      if (!room) {
-        room = { players: new Map(), bots: [], mode: userData.mode || 'points' };
-        rooms.set(roomId, room);
-      } else if (userData.mode) {
-        room.mode = userData.mode; // Update mode if provided
+
+      // Corner assignment for CTF
+      let cornerIndex = -1;
+      if (room.mode === 'ctf') {
+        const occupied = Array.from(room.players.values()).map((p: any) => p.corner);
+        const order = [0, 3, 2, 1]; // Rojo, Blanco, Azul, Verde
+        for (const i of order) {
+          if (!occupied.includes(i)) {
+            cornerIndex = i;
+            break;
+          }
+        }
       }
       
       const newPlayer: Player = {
         id: socket.id,
+        userId: userData.id,
         roomId,
         displayName: userData.displayName || "Invitado",
         segments: [],
@@ -808,23 +892,233 @@ async function startServer() {
         angle: 0,
         wager: userData.wager || 0,
         hasAura: userData.hasAura,
-        auraType: userData.auraType
+        auraType: userData.auraType,
+        color1: userData.color1 || (cornerIndex !== -1 ? COLORS[cornerIndex] : undefined),
+        color2: userData.color2,
+        skinEmoji: userData.skinEmoji,
+        tailEmoji: userData.tailEmoji,
+        corner: cornerIndex,
+        hasFlag: null,
+        isEliminated: false
       };
 
       socket.join(roomId);
       room.players.set(socket.id, newPlayer);
       
-      console.log(`User ${socket.id} joined ${roomId}. Players: ${room.players.size}`);
-
-      socket.emit("joined_room", { roomId, playersCount: room.players.size });
+      // Activate flag for the joined corner
+      if (room.mode === 'ctf' && room.flags && cornerIndex !== -1) {
+        room.flags[cornerIndex].active = true;
+      }
       
-      socket.to(roomId).emit("player_joined", { 
+      console.log(`User ${socket.id} joined ${roomId} (Corner: ${cornerIndex}). Players: ${room.players.size}`);
+      
+      // NEW: Trigger game start when 4 players are reached
+      if (room.mode === 'ctf' && room.players.size === 4 && room.status === 'waiting') {
+        room.status = 'playing';
+        io.to(roomId).emit("ctf_game_start", { status: 'playing' });
+        
+        // Update persistence
+        db.collection('ctf_rooms').doc(roomId).update({
+          status: 'playing'
+        }).catch(() => {});
+      }
+      
+      io.to(roomId).emit("player_joined", { 
         id: socket.id, 
         displayName: newPlayer.displayName,
-        skin: userData.equippedSkin,
-        hasAura: userData.hasAura,
-        auraType: userData.auraType
+        playersCount: room.players.size,
+        corner: newPlayer.corner,
+        color1: newPlayer.color1,
+        skinEmoji: newPlayer.skinEmoji
       });
+
+      socket.emit("joined_room", { 
+        roomId,
+        playersCount: room.players.size,
+        flags: room.flags,
+        corner: newPlayer.corner,
+        status: room.status
+      });
+    });
+
+    socket.on("update_position", (data) => {
+      const roomEntry = Array.from(rooms.values()).find(r => r.players.has(socket.id));
+      if (!roomEntry) return;
+      const player = roomEntry.players.get(socket.id);
+      if (!player || !player.isAlive || player.isEliminated) return;
+      
+      const roomId = player.roomId;
+      const room = rooms.get(roomId);
+      if (!room) return;
+
+      // Update basic state
+      player.segments = data.segments || [];
+      player.angle = data.angle;
+      player.isBoosting = data.isBoosting;
+      player.wager = data.wager || player.wager;
+      
+      const head = player.segments[0];
+      if (!head) return;
+
+      const now = Date.now();
+      const isInvulnerable = now - player.spawnTime < 2500;
+
+      // Carry flag logic
+      if (room.mode === 'ctf' && player.hasFlag !== null && room.flags) {
+        const flag = room.flags[player.hasFlag];
+        if (flag) {
+          flag.x = head.x;
+          flag.y = head.y;
+        }
+      }
+
+      // Collision logic
+      if (!isInvulnerable) {
+        for (const [otherId, other] of room.players.entries()) {
+          if (otherId === socket.id || !other.isAlive || other.isEliminated) continue;
+          
+          // Tail collision (Head vs Body)
+          for (const seg of other.segments) {
+            const dx = head.x - seg.x;
+            const dy = head.y - seg.y;
+            if (Math.sqrt(dx * dx + dy * dy) < CELL) {
+              
+              // If CTF mode, check if we simply steal or both die
+              if (room.mode === 'ctf') {
+                 // In CTF, if you hit a body, you drop your flag and die
+                 if (player.hasFlag !== null && room.flags) {
+                    const fIdx = player.hasFlag;
+                    room.flags[fIdx].carrierId = null;
+                    player.hasFlag = null;
+                    io.to(roomId).emit("ctf_flag_update", { flags: room.flags });
+                 }
+              }
+
+              player.isAlive = false;
+              socket.emit("server_death", { killerName: other.displayName });
+              io.to(roomId).emit("player_died", { 
+                id: socket.id, 
+                killerName: other.displayName,
+                wager: player.wager,
+                segments: player.segments
+              });
+              return;
+            }
+          }
+
+          // CTF Theft Logic: If my head touches someone who has a flag, I steal it
+          if (room.mode === 'ctf' && other.hasFlag !== null && player.hasFlag === null) {
+             const d = Math.sqrt((head.x - other.segments[0].x)**2 + (head.y - other.segments[0].y)**2);
+             if (d < CELL * 2) {
+                const flagIndex = other.hasFlag;
+                room.flags![flagIndex].carrierId = socket.id;
+                player.hasFlag = flagIndex;
+                other.hasFlag = null;
+                io.to(roomId).emit("ctf_flag_update", { flags: room.flags });
+             }
+          }
+        }
+      }
+
+      // Broadcast position to others
+      socket.to(roomId).emit("player_moved", {
+        id: socket.id,
+        hasAura: player.hasAura,
+        auraType: player.auraType,
+        ...data
+      });
+    });
+
+    socket.on("ctf_pickup", ({ flagIndex }) => {
+      const player = Array.from(rooms.values()).find(r => r.players.has(socket.id))?.players.get(socket.id);
+      if (!player || !player.roomId || player.isEliminated) return;
+      const room = rooms.get(player.roomId);
+      if (!room || !room.flags || !room.flags[flagIndex]) return;
+
+      const flag = room.flags[flagIndex];
+      
+      // NEW: Check if the flag owner is in the room and not eliminated
+      const ownerExists = Array.from(room.players.values()).some(p => p.corner === flag.ownerCorner && !p.isEliminated);
+      if (!ownerExists) {
+        console.log(`[CTF] Flag ${flagIndex} pickup denied: owner not in arena.`);
+        return;
+      }
+
+      if (flag.carrierId === null && flag.ownerCorner !== player.corner && player.hasFlag === null) {
+        flag.carrierId = socket.id;
+        player.hasFlag = flagIndex;
+        io.to(player.roomId).emit("ctf_flag_update", { flags: room.flags });
+      }
+    });
+
+    socket.on("ctf_score", async ({ flagIndex }) => {
+      const player = Array.from(rooms.values()).find(r => r.players.has(socket.id))?.players.get(socket.id);
+      if (!player || !player.roomId || player.hasFlag !== flagIndex) return;
+      const room = rooms.get(player.roomId);
+      if (!room || !room.flags) return;
+
+      const flag = room.flags[flagIndex];
+      const flagOwnerCorner = flag.ownerCorner;
+      
+      // Find the player who owns this flag to eliminate them
+      const victimEntry = Array.from(room.players.entries()).find(([_, p]) => p.corner === flagOwnerCorner);
+      if (victimEntry) {
+        const [vSocketId, vPlayer] = victimEntry;
+        vPlayer.isEliminated = true;
+        
+        // Deactivate flag
+        flag.active = false;
+        
+        io.to(player.roomId).emit("ctf_player_eliminated", { id: vPlayer.userId, socketId: vSocketId });
+        
+        // Update Firestore
+        db.collection('ctf_rooms').doc(player.roomId).update({
+          [`players.${vPlayer.userId}.isEliminated`]: true
+        }).catch((e) => {
+          console.error(`Error updating ctf_room ${player.roomId}:`, e);
+        });
+      }
+
+      // Reset flag
+      flag.carrierId = null;
+      flag.x = CORNERS[flag.ownerCorner].x;
+      flag.y = CORNERS[flag.ownerCorner].y;
+      player.hasFlag = null;
+
+      io.to(player.roomId).emit("ctf_flag_update", { flags: room.flags });
+      io.to(player.roomId).emit("ctf_score", { 
+        scorerId: player.userId, 
+        flagOwnerCorner: flag.ownerCorner,
+        reward: room.wager || 0 
+      });
+
+      if (player.userId) {
+        try {
+          await db.collection('users').doc(player.userId).update({
+            monedas: admin.firestore.FieldValue.increment((room.wager || 0) * 2)
+          });
+        } catch (e) { 
+          console.error(`Score reward err for user ${player.userId}:`, e);
+          if (e instanceof Error) {
+            console.error("Stack:", e.stack);
+          }
+        }
+      }
+    });
+
+    socket.on("ctf_steal", ({ victimId }) => {
+      const thief = Array.from(rooms.values()).find(r => r.players.has(socket.id))?.players.get(socket.id);
+      if (!thief || thief.hasFlag !== null) return;
+      const room = rooms.get(thief.roomId);
+      const victim = room?.players.get(victimId);
+      if (!victim || victim.hasFlag === null) return;
+
+      const flagIdx = victim.hasFlag;
+      victim.hasFlag = null;
+      thief.hasFlag = flagIdx;
+      room!.flags![flagIdx].carrierId = thief.id;
+      
+      io.to(thief.roomId).emit("ctf_flag_update", { flags: room!.flags });
     });
 
     socket.on("player_died", (data) => {
@@ -848,64 +1142,6 @@ async function startServer() {
       });
     });
 
-    socket.on("update_position", (data) => {
-      const roomId = Array.from(socket.rooms).find(r => r !== socket.id);
-      if (!roomId) return;
-
-      const room = rooms.get(roomId);
-      if (!room) return;
-
-      const player = room.players.get(socket.id);
-      if (!player || !player.isAlive) return;
-
-      // Update server-side state
-      player.segments = data.segments || [];
-      player.wager = data.wager || player.wager;
-      
-      // Server-side collision detection: Head vs Other Bodies
-      const head = player.segments[0];
-      if (head) {
-        const now = Date.now();
-        const isInvulnerable = now - player.spawnTime < 1000;
-        
-        if (!isInvulnerable) {
-          for (const [otherId, other] of room.players.entries()) {
-            if (otherId === socket.id || !other.isAlive) continue;
-            
-            const otherInvulnerable = Date.now() - other.spawnTime < 1000;
-            if (otherInvulnerable) continue;
-
-            // Check head vs other's segments
-            for (const seg of other.segments) {
-              const dx = head.x - seg.x;
-              const dy = head.y - seg.y;
-              const dist = Math.sqrt(dx * dx + dy * dy);
-              
-              if (dist < CELL) {
-                // Collision! Player dies
-                player.isAlive = false;
-                socket.emit("server_death", { killerName: other.displayName });
-                socket.to(roomId).emit("player_died", { 
-                  id: socket.id, 
-                  killerName: other.displayName,
-                  wager: player.wager,
-                  segments: player.segments
-                });
-                return; // Stop checking for this player
-              }
-            }
-          }
-        }
-      }
-
-      // Broadcast position to others
-      socket.to(roomId).emit("player_moved", {
-        id: socket.id,
-        hasAura: player.hasAura,
-        auraType: player.auraType,
-        ...data
-      });
-    });
 
     socket.on("disconnecting", () => {
       socket.rooms.forEach(roomId => {
@@ -926,9 +1162,74 @@ async function startServer() {
       if (userId && userSockets.get(userId) === socket.id) {
         userSockets.delete(userId);
       }
+      
+      rooms.forEach((room, roomId) => {
+        if (room.players.has(socket.id)) {
+          const player = room.players.get(socket.id);
+          room.players.delete(socket.id);
+          
+          if (room.mode === 'wager' || room.mode === 'points' || room.mode === 'ctf') {
+            const roomRef = db.collection(room.mode === 'ctf' ? 'ctf_rooms' : (room.mode === 'wager' ? 'wager_rooms' : 'private_rooms')).doc(roomId);
+            roomRef.update({
+              [`players.${(player as any).userId}`]: FieldValue.delete()
+            }).catch(() => {});
+
+            if (room.mode === 'ctf' && room.flags) {
+              const flagIndex = (player as any).hasFlag;
+              if (flagIndex !== null && room.flags[flagIndex]) {
+                room.flags[flagIndex].carrierId = null;
+              }
+              
+              const myCorner = (player as any).corner;
+              if (myCorner !== -1 && room.flags[myCorner]) {
+                room.flags[myCorner].active = false;
+              }
+              
+              io.to(roomId).emit("ctf_flag_update", { flags: room.flags });
+            }
+          }
+          
+          if (room.players.size === 0 && room.bots.length === 0) {
+            rooms.delete(roomId);
+          } else {
+            // Update flags based on remaining players
+            if (room.mode === 'ctf' && room.flags) {
+              room.flags.forEach((f, i) => {
+                const owner = Array.from(room.players.values()).find((p: any) => p.corner === i);
+                if (!owner) {
+                  f.active = false;
+                  f.carrierId = null;
+                }
+              });
+              io.to(roomId).emit("ctf_flag_update", { flags: room.flags });
+            }
+            io.to(roomId).emit("player_left", { id: socket.id });
+          }
+        }
+      });
+
       console.log(`User disconnected: ${socket.id}`);
     });
   });
+
+  // NEW: Broadcast CTF lobby counts to all clients every 2 seconds
+  setInterval(() => {
+    const ctfWagers = [1000, 2500, 5000, 10000, 20000];
+    const counts: Record<number, number> = {};
+    
+    ctfWagers.forEach(w => {
+      // Find the room that is currently "waiting" for this wager
+      let totalWaiting = 0;
+      for (const room of rooms.values()) {
+        if (room.mode === 'ctf' && room.wager === w && room.status === 'waiting') {
+          totalWaiting = Math.max(totalWaiting, room.players.size);
+        }
+      }
+      counts[w] = totalWaiting;
+    });
+    
+    io.emit("ctf_lobby_counts", counts);
+  }, 2000);
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
@@ -938,7 +1239,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.join(process.cwd(), 'build');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

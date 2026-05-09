@@ -5,7 +5,7 @@ import { ARENA_ITEMS } from '../items';
 import { doc, setDoc, deleteDoc, onSnapshot, collection, query, where, serverTimestamp, addDoc, updateDoc, increment, orderBy, limit } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType, auth } from '../firebase';
 import { motion, AnimatePresence } from 'motion/react';
-import { Trophy, Coins, ArrowLeft, Zap, LogOut, MessageSquare, Send, Users, X, Target } from 'lucide-react';
+import { Trophy, Coins, ArrowLeft, Zap, LogOut, MessageSquare, Send, Users, X } from 'lucide-react';
 import { GoldPointIcon } from './Icons';
 import { soundManager } from '../lib/sounds';
 import { supabase } from '../lib/supabase';
@@ -33,6 +33,14 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
   const [chatInput, setChatInput] = useState('');
   const [showChat, setShowChat] = useState(false);
   const [onlineCount, setOnlineCount] = useState(0);
+  const [boostCharge, setBoostCharge] = useState(5.0); // 5 seconds max
+  const boostChargeRef = useRef(5.0);
+  const [isOverheated, setIsOverheated] = useState(false);
+  const [cooldownTime, setCooldownTime] = useState(0);
+  const cooldownTimeRef = useRef(0);
+  const frameCounterRef = useRef(0);
+  const smokeParticlesRef = useRef<{x: number, y: number, id: number, life: number, vx: number, vy: number}[]>([]);
+  const floatingTextsRef = useRef<{ id: string; x: number; y: number; text: string; color: string; opacity: number }[]>([]);
   const [serverId, setServerId] = useState<string | null>(null);
   const [kills, setKills] = useState<KillEvent[]>([]);
   const [paymentNotice, setPaymentNotice] = useState<{ id: string; status: string; amount: number } | null>(null);
@@ -45,17 +53,14 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
   const isTouchBoostingRef = useRef(false);
 
   // Abilities state
-  const [isStopped, setIsStopped] = useState(false);
-  const [isAutopilot, setIsAutopilot] = useState(false);
   const [isInvulnerable, setIsInvulnerable] = useState(false);
   const [lastTeleportTime, setLastTeleportTime] = useState(0);
-  const [floatingTexts, setFloatingTexts] = useState<{ id: string; x: number; y: number; text: string; color: string; opacity: number }[]>([]);
   const equippedAbilities = user.equippedAbilities || [];
   const hasZoom = equippedAbilities.includes('zoom');
   const hasMagnet = equippedAbilities.includes('magnet');
   const hasTeleport = equippedAbilities.includes('teleport');
-  const hasStop = equippedAbilities.includes('stop');
-  const hasAutopilot = equippedAbilities.includes('autopilot');
+  const hasGrosor = equippedAbilities.includes('grosor');
+  const hasBoostCooldown = equippedAbilities.includes('boost_cooldown');
   
   const handleTeleport = async () => {
     if (!hasTeleport || user.coins < 250) return;
@@ -64,10 +69,15 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
 
     // Cost (to saldo)
     try {
-      const userRef = doc(db, 'users', user.id);
-      await updateDoc(userRef, {
-        coins: increment(-250)
-      });
+      if (!user.isGuest) {
+        const userRef = doc(db, 'users', user.id);
+        await updateDoc(userRef, {
+          coins: increment(-250)
+        });
+      } else {
+        // Guest points update
+        // We handle it locally later in the frame or just update user state
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `users/${user.id}`);
       return;
@@ -76,15 +86,15 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     setLastTeleportTime(now);
     
     // Add floating text above the button
-    const textId = Math.random().toString(36).substr(2, 9);
-    setFloatingTexts(prev => [...prev, {
+    const textId = `ft-${Math.random().toString(36).substr(2, 9)}-${Date.now()}`;
+    floatingTextsRef.current.push({
       id: textId,
       x: 20,
       y: window.innerHeight - 100,
       text: '-250 Puntos',
       color: '#fbbf24',
       opacity: 1
-    }]);
+    });
 
     soundManager.play('star'); // Flash sound
     
@@ -118,8 +128,10 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     color1: ALL_SKINS.find(s => s.id === user.equippedSkin)?.colors[0] || '#22ff44',
     color2: ALL_SKINS.find(s => s.id === user.equippedSkin)?.colors[1] || '#11cc33',
     skinEmoji: ALL_SKINS.find(s => s.id === user.equippedSkin)?.icon,
+    tailEmoji: ALL_SKINS.find(s => s.id === user.equippedSkin)?.tailIcon,
     hasAura: ALL_SKINS.find(s => s.id === user.equippedSkin)?.hasAura,
     auraType: ALL_SKINS.find(s => s.id === user.equippedSkin)?.auraType,
+    skinId: user.equippedSkin,
     isBoosting: false
   });
 
@@ -137,55 +149,65 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
 
   useEffect(() => {
     const initServer = async () => {
-      const id = await findAvailableServer('arenaPlayers');
-      setServerId(id);
-      playerRef.current.serverId = id;
+      try {
+        const id = await findAvailableServer('arenaPlayers');
+        if (!id) throw new Error("No server ID returned");
+        setServerId(id);
+        playerRef.current.serverId = id;
 
-      // Initialize Socket.io
-      const socket = io(window.location.origin);
-      socketRef.current = socket;
+        // Initialize Socket.io
+        const socket = io(window.location.origin);
+        socketRef.current = socket;
 
-      socket.on("connect", () => {
-        console.log("Connected to WebSocket server");
-        // Use a prefix for the serverId based on category to separate players
-        const categoryServerId = `basica_${id}`;
-        socket.emit("join_arena", {
-          id: user.id,
-          displayName: user.displayName,
-          equippedSkin: user.equippedSkin,
-          hasAura: playerRef.current.hasAura,
-          auraType: playerRef.current.auraType,
-          serverId: categoryServerId,
-          wager: 0,
-          mode: 'points'
+        socket.on("connect", () => {
+          console.log("Connected to WebSocket server");
+          // Use a prefix for the serverId based on category to separate players
+          const categoryServerId = `basica_${id}`;
+          socket.emit("join_arena", {
+            id: user.id,
+            displayName: user.displayName,
+            equippedSkin: user.equippedSkin,
+            hasAura: playerRef.current.hasAura,
+            auraType: playerRef.current.auraType,
+            serverId: categoryServerId,
+            wager: 0,
+            mode: 'points'
+          });
         });
-      });
 
-      socket.on("payment_status_update", (data) => {
-        console.log("Status de pago actualizado:", data);
-        setPaymentNotice(data);
-        setTimeout(() => setPaymentNotice(null), 8000); // Auto close after 8s
-      });
+        socket.on("payment_status_update", (data) => {
+          console.log("Status de pago actualizado:", data);
+          setPaymentNotice(data);
+          setTimeout(() => setPaymentNotice(null), 8000); // Auto close after 8s
+        });
 
-      socket.on("joined_room", ({ roomId }) => {
-        console.log(`Joined WebSocket room: ${roomId}`);
-      });
+        socket.on("joined_room", ({ roomId }) => {
+          console.log(`Joined WebSocket room: ${roomId}`);
+        });
 
-      socket.on("player_moved", (data) => {
-        if (data.id !== user.id) {
-          otherPlayersRef.current[data.id] = {
-            ...data,
-            lastUpdate: Date.now()
-          };
-        }
-      });
+        socket.on("player_moved", (data) => {
+          if (data.id !== user.id) {
+            otherPlayersRef.current[data.id] = {
+              ...data,
+              lastUpdate: Date.now()
+            };
+          }
+        });
 
-      socket.on("player_died", ({ id, killerName }) => {
-        if (id !== user.id) {
-          delete otherPlayersRef.current[id];
-          delete interpolatedPlayersRef.current[id];
-        }
-      });
+        socket.on("player_died", ({ id, killerName }) => {
+          if (id !== user.id) {
+            delete otherPlayersRef.current[id];
+            delete interpolatedPlayersRef.current[id];
+          }
+        });
+      } catch (err) {
+        console.error("Error initializing server in Arena:", err);
+        // Fallback to a default server if search fails
+        const fallbackId = "server_1";
+        setServerId(fallbackId);
+        playerRef.current.serverId = fallbackId;
+        setShowCancel(true);
+      }
     };
     initServer();
 
@@ -504,49 +526,57 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       playerRef.current.angle += diff * Math.min(1, 8 * dt);
     }
 
-    playerRef.current.isBoosting = isBoosting && playerRef.current.wager > 0;
-    
-    let speed = isBoosting && playerRef.current.wager > 0 ? BASE_SPEED * 2 : BASE_SPEED;
-    
-    // STOP ABILITY
-    if (isStopped) speed = 0;
-
-    // AUTOPILOT ABILITY
-    if (isAutopilot && !isStopped) {
-      let nearestTarget: {x: number, y: number} | null = null;
-      let minDist = 300;
-      
-      // Find nearest food
-      Object.values(foodsRef.current).forEach((f: any) => {
-        const d = Math.sqrt((head.x - f.x) ** 2 + (head.y - f.y) ** 2);
-        if (d < minDist) {
-          minDist = d;
-          nearestTarget = { x: f.x, y: f.y };
-        }
-      });
-
-      if (nearestTarget) {
-        const dxT = nearestTarget.x - head.x;
-        const dyT = nearestTarget.y - head.y;
-        const targetAngle = Math.atan2(dyT, dxT);
-        let diff = targetAngle - playerRef.current.angle;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        playerRef.current.angle += diff * Math.min(1, 5 * dt);
+    // Boost logic changes
+    let actualIsBoosting = isBoosting && !isOverheated;
+    if (actualIsBoosting) {
+      boostChargeRef.current = Math.max(0, boostChargeRef.current - dt);
+      if (boostChargeRef.current === 0 && !isOverheated) {
+        setIsOverheated(true);
+        cooldownTimeRef.current = 30;
       }
+    } else if (isOverheated) {
+      cooldownTimeRef.current = Math.max(0, cooldownTimeRef.current - dt);
+      if (cooldownTimeRef.current === 0) setIsOverheated(false);
+      // Recover charge during cooldown
+      boostChargeRef.current = Math.min(5, boostChargeRef.current + (5 / 30) * dt);
 
-      // Obstacle avoidance (walls)
-      const lookAhead = 100;
-      const futureX = head.x + Math.cos(playerRef.current.angle) * lookAhead;
-      const futureY = head.y + Math.sin(playerRef.current.angle) * lookAhead;
-      if (futureX < 50 || futureX > WORLD_W - 50 || futureY < 50 || futureY > WORLD_H - 50) {
-        playerRef.current.angle += Math.PI * 0.1; // Turn away
+      // Smoke particles
+      if (Math.random() > 0.7) {
+        smokeParticlesRef.current.push({
+          x: head.x,
+          y: head.y,
+          id: Math.random(),
+          life: 1.0,
+          vx: (Math.random() - 0.5) * 50,
+          vy: (Math.random() - 0.5) * 50 - 30
+        });
       }
+    } else if (boostChargeRef.current < 5) {
+      // Slow recovery when not boosting and not overheated
+      boostChargeRef.current = Math.min(5, boostChargeRef.current + 0.5 * dt);
     }
 
-    if (isBoosting && playerRef.current.wager > 0 && !isStopped) {
-      playerRef.current.wager -= 0.2 * dt * 60; // Consume points over time
+    // Throttle state updates for UI performance
+    frameCounterRef.current++;
+    if (frameCounterRef.current % 3 === 0) {
+      setBoostCharge(boostChargeRef.current);
+      setCooldownTime(cooldownTimeRef.current);
     }
+
+    // Update smoke particles
+    smokeParticlesRef.current = smokeParticlesRef.current.map(p => ({
+      ...p,
+      x: p.x + p.vx * dt,
+      y: p.y + p.vy * dt,
+      life: p.life - dt * 0.8
+    })).filter(p => p.life > 0);
+
+    playerRef.current.isBoosting = actualIsBoosting;
+    
+    let speed = actualIsBoosting ? BASE_SPEED * 2 : BASE_SPEED;
+    
+    // No more point consumption for boost
+    
     const newX = head.x + Math.cos(playerRef.current.angle) * speed * dt;
     const newY = head.y + Math.sin(playerRef.current.angle) * speed * dt;
 
@@ -566,17 +596,10 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     // New growth logic: starting size (12 base segments) + scaling segments
     const collectedPoints = Math.max(0, playerRef.current.wager - wager);
     const pointsPerSegment = 5; // internal visual resolution
-    const baseSegments = 12;
     
-    // Multi-stage linear growth: 
-    // - Up to 3000 points: 1 segment per 50 points (60 segments)
-    // - After 3000 points: 1 segment per 150 points
-    let bonusSegments = 0;
-    if (collectedPoints <= 3000) {
-      bonusSegments = Math.floor(collectedPoints / 50);
-    } else {
-      bonusSegments = 60 + Math.floor((collectedPoints - 3000) / 150);
-    }
+    // Uniform growth logic: 1 segment per 50 points constantly
+    const baseSegments = 12;
+    const bonusSegments = Math.floor(collectedPoints / 50);
     
     const targetSegments = baseSegments + bonusSegments;
     const maxTrailLen = targetSegments * pointsPerSegment;
@@ -599,12 +622,12 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     
     cameraRef.current.zoom += (targetZoomBase - cameraRef.current.zoom) * 0.02;
 
-    // Update floating texts
-    setFloatingTexts(prev => prev.map(ft => ({
+    // Update floating texts (Ref logic, no state update here)
+    floatingTextsRef.current = floatingTextsRef.current.map(ft => ({
       ...ft,
       y: ft.y - 1,
       opacity: ft.opacity - 0.02
-    })).filter(ft => ft.opacity > 0));
+    })).filter(ft => ft.opacity > 0);
   };
 
   const createBot = (index: number, sId?: string): PlayerSession => {
@@ -699,7 +722,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       const d = Math.sqrt(dx * dx + dy * dy);
       
       const attractionRadius = hasMagnet ? CELL * 3 : 0;
-      const collectionRadius = CELL;
+      const collectionRadius = hasGrosor ? CELL * 2 : CELL;
 
       // Magnet attraction effect
       if (hasMagnet && d < attractionRadius && d > collectionRadius) {
@@ -759,10 +782,12 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       const isOtherInvulnerable = other.spawnTime && (Date.now() - other.spawnTime < 1500);
       if (isOtherInvulnerable) return;
 
+      const hitBox = hasGrosor ? CELL * 2 : CELL;
+
       // Case 1: My Head hits Their Body (I die)
       other.segments.forEach((seg, i) => {
         const d = Math.sqrt((head.x - seg.x) ** 2 + (head.y - seg.y) ** 2);
-        if (d < CELL) {
+        if (d < hitBox) {
           handleDeath(other.displayName);
         }
       });
@@ -772,7 +797,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       if (otherHead) {
         playerRef.current.segments.forEach((seg) => {
           const d = Math.sqrt((otherHead.x - seg.x) ** 2 + (seg.y - otherHead.y) ** 2);
-          if (d < CELL) {
+          if (d < hitBox) {
             // They collided with me! From my perspective, they should die and drop food.
             // We emit the death event to informer others/server
             if (socketRef.current?.connected) {
@@ -833,6 +858,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
                 killerName: user.displayName,
                 victimName: bot.displayName,
                 timestamp: Date.now(),
+                serverId: serverId || 'local'
               }).catch(() => {});
             }
             break;
@@ -951,47 +977,60 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     }
     
     const finalScore = Math.floor(playerRef.current.wager);
-    const playerDocRef = doc(db, 'arenaPlayers', user.id);
-    await updateDoc(playerDocRef, { isAlive: false })
-      .catch(e => handleFirestoreError(e, OperationType.UPDATE, 'arenaPlayers/' + user.id));
-
-    // Player drops their score for others to pick up
-    dropArenaFood(playerRef.current);
-
-    // Update user highScore
-    const userRef = doc(db, 'users', user.id);
     const earnings = Math.floor(Math.max(0, playerRef.current.wager - wager));
     
-    await updateDoc(userRef, {
-      coins: increment(earnings),
-      highScore: Math.max(user.highScore, finalScore)
-    }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+    if (!user.isGuest) {
+      const playerDocRef = doc(db, 'arenaPlayers', user.id);
+      await updateDoc(playerDocRef, { isAlive: false })
+        .catch(e => handleFirestoreError(e, OperationType.UPDATE, 'arenaPlayers/' + user.id));
 
-    // Sync with Supabase
-    await supabase.from('profiles').update({
-      coins: user.coins + earnings,
-      high_score: Math.max(user.highScore, finalScore)
-    }).eq('id', user.id);
+      // Player drops their score for others to pick up
+      dropArenaFood(playerRef.current);
 
-    // Record transaction
-    if (earnings > 0) {
-      await supabase.from('transactions').insert({
-        user_id: user.id,
-        type: 'collected',
-        currency: 'coins',
-        amount: earnings,
-        reason: 'game_win',
-        timestamp: new Date().toISOString()
-      });
-    } else if (wager > 0) {
-      await supabase.from('transactions').insert({
-        user_id: user.id,
-        type: 'lost',
-        currency: 'coins',
-        amount: wager,
-        reason: 'game_loss',
-        timestamp: new Date().toISOString()
-      });
+      // Update user highScore
+      const userRef = doc(db, 'users', user.id);
+      
+      await updateDoc(userRef, {
+        coins: increment(earnings),
+        highScore: Math.max(user.highScore, finalScore)
+      }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+
+      // Sync with Supabase
+      await supabase.from('profiles').update({
+        coins: user.coins + earnings,
+        high_score: Math.max(user.highScore, finalScore)
+      }).eq('id', user.id);
+
+      // Record transaction
+      if (earnings > 0) {
+        await supabase.from('transactions').insert({
+          user_id: user.id,
+          type: 'collected',
+          currency: 'coins',
+          amount: earnings,
+          reason: 'game_win',
+          timestamp: new Date().toISOString()
+        });
+      } else if (wager > 0) {
+        await supabase.from('transactions').insert({
+          user_id: user.id,
+          type: 'lost',
+          currency: 'coins',
+          amount: wager,
+          reason: 'game_loss',
+          timestamp: new Date().toISOString()
+        });
+      }
+    } else {
+      // Guest logic
+      const updatedUser = { 
+        ...user, 
+        coins: user.coins + earnings,
+        highScore: Math.max(user.highScore, finalScore)
+      };
+      localStorage.setItem('viborita_guest_data', JSON.stringify(updatedUser));
+      // No need to call setUser here as the component will unmount soon, 
+      // but we might want to update it if the parent needs it.
     }
   };
 
@@ -1007,35 +1046,47 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
 
     const finalScore = Math.floor(playerRef.current.wager);
     const earnings = Math.floor(Math.max(0, playerRef.current.wager - wager));
-    const playerDocRef = doc(db, 'arenaPlayers', user.id);
-    await updateDoc(playerDocRef, { isAlive: false })
-      .catch(e => handleFirestoreError(e, OperationType.UPDATE, 'arenaPlayers/' + user.id));
 
-    // Update user coins (credit entire score)
-    const userRef = doc(db, 'users', user.id);
-    const newBalance = user.coins + finalScore;
-    setFinalBalance(newBalance);
+    if (!user.isGuest) {
+      const playerDocRef = doc(db, 'arenaPlayers', user.id);
+      await updateDoc(playerDocRef, { isAlive: false })
+        .catch(e => handleFirestoreError(e, OperationType.UPDATE, 'arenaPlayers/' + user.id));
 
-    await updateDoc(userRef, {
-      coins: increment(finalScore),
-      highScore: Math.max(user.highScore, finalScore)
-    }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+      // Update user coins (credit entire score)
+      const userRef = doc(db, 'users', user.id);
+      const newBalance = user.coins + finalScore;
+      setFinalBalance(newBalance);
 
-    // Sync with Supabase
-    await supabase.from('profiles').update({
-      coins: user.coins + finalScore,
-      high_score: Math.max(user.highScore, finalScore)
-    }).eq('id', user.id);
+      await updateDoc(userRef, {
+        coins: increment(finalScore),
+        highScore: Math.max(user.highScore, finalScore)
+      }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
 
-    // Record transaction
-    await supabase.from('transactions').insert({
-      user_id: user.id,
-      type: 'collected',
-      currency: 'coins',
-      amount: finalScore,
-      reason: 'game_collect',
-      timestamp: new Date().toISOString()
-    });
+      // Sync with Supabase
+      await supabase.from('profiles').update({
+        coins: user.coins + finalScore,
+        high_score: Math.max(user.highScore, finalScore)
+      }).eq('id', user.id);
+
+      // Record transaction
+      await supabase.from('transactions').insert({
+        user_id: user.id,
+        type: 'collected',
+        currency: 'coins',
+        amount: finalScore,
+        reason: 'game_collect',
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      // Guest logic
+      const updatedUser = { 
+        ...user, 
+        coins: user.coins + finalScore,
+        highScore: Math.max(user.highScore, finalScore)
+      };
+      setFinalBalance(updatedUser.coins);
+      localStorage.setItem('viborita_guest_data', JSON.stringify(updatedUser));
+    }
   };
 
   const handleSendMessage = async (e: FormEvent) => {
@@ -1044,6 +1095,8 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
 
     const msg = chatInput.trim();
     setChatInput('');
+
+    if (user.isGuest) return; // Guests can't chat
 
     await addDoc(collection(db, 'arenaChat'), {
       userId: user.id,
@@ -1196,6 +1249,19 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
 
     // Draw Mini-map
     drawMinimap(ctx);
+
+    // Draw Floating Texts
+    ctx.restore(); // Out of camera space if they are UI-based, or keep in if in-world
+    // Actually the logic above uses window.innerHeight, so they are UI-relative
+    floatingTextsRef.current.forEach(ft => {
+      ctx.save();
+      ctx.globalAlpha = ft.opacity;
+      ctx.fillStyle = ft.color;
+      ctx.font = 'black 12px Arial';
+      ctx.textAlign = 'left';
+      ctx.fillText(ft.text, ft.x, ft.y);
+      ctx.restore();
+    });
   };
 
   const drawMinimap = (ctx: CanvasRenderingContext2D) => {
@@ -1316,6 +1382,26 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         gradient.addColorStop(0, 'rgba(255, 255, 0, 0.5)');
         gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.3)');
         gradient.addColorStop(1, 'rgba(255, 255, 200, 0)');
+      } else if (snake.auraType === 'water') {
+        gradient.addColorStop(0, 'rgba(59, 130, 246, 0.6)');
+        gradient.addColorStop(0.5, 'rgba(30, 64, 175, 0.4)');
+        gradient.addColorStop(1, 'rgba(30, 58, 138, 0)');
+      } else if (snake.auraType === 'death') {
+        gradient.addColorStop(0, 'rgba(75, 85, 99, 0.5)');
+        gradient.addColorStop(0.5, 'rgba(6, 78, 59, 0.3)');
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      } else if (snake.auraType === 'crystal') {
+        gradient.addColorStop(0, 'rgba(34, 211, 238, 0.5)');
+        gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.3)');
+        gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      } else if (snake.auraType === 'ember') {
+        gradient.addColorStop(0, 'rgba(239, 68, 68, 0.6)');
+        gradient.addColorStop(0.5, 'rgba(0, 0, 0, 0.4)');
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      } else if (snake.auraType === 'nebula') {
+        gradient.addColorStop(0, 'rgba(236, 72, 153, 0.5)');
+        gradient.addColorStop(0.5, 'rgba(126, 34, 206, 0.3)');
+        gradient.addColorStop(1, 'rgba(88, 28, 135, 0)');
       }
       
       ctx.fillStyle = gradient;
@@ -1346,18 +1432,49 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
           }
         }
       } else if (Math.random() > 0.6) {
+        let rSize = Math.random() * 3 + 1;
         if (snake.auraType === 'fire') {
           ctx.fillStyle = `rgba(255, ${Math.floor(Math.random() * 100 + 50)}, 0, 0.5)`;
         } else if (snake.auraType === 'ice') {
           ctx.fillStyle = `rgba(${Math.floor(Math.random() * 50 + 200)}, 255, 255, 0.5)`;
+        } else if (snake.auraType === 'water') {
+          ctx.fillStyle = `rgba(147, 197, 253, 0.6)`;
+        } else if (snake.auraType === 'death') {
+          ctx.fillStyle = `rgba(75, 85, 99, ${Math.random() * 0.5})`;
+        } else if (snake.auraType === 'crystal') {
+          ctx.fillStyle = `rgba(255, 255, 255, ${Math.random() * 0.8})`;
+          rSize = Math.random() * 3 + 1;
+        } else if (snake.auraType === 'ember') {
+          ctx.fillStyle = Math.random() > 0.5 ? '#ef4444' : '#f97316';
+          rSize = Math.random() * 2 + 1;
+        } else if (snake.auraType === 'nebula') {
+          if (['dragon_fuego'].includes(snake.skinId || '')) return; // Quitar partículas para el skin de dragón
+          ctx.fillStyle = Math.random() > 0.5 ? '#ec4899' : '#a855f7';
         }
         ctx.beginPath();
         const px = trail[0].x + (Math.random() - 0.5) * headRadius * 2;
         const py = trail[0].y + (Math.random() - 0.5) * headRadius * 2;
-        ctx.arc(px, py, Math.random() * 3 + 1, 0, Math.PI * 2);
+        ctx.arc(px, py, rSize, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.restore();
+    }
+
+    const isOverheated = snake.userId === user.id && cooldownTime > 0;
+    const bodyRadius = (hasGrosor && snake.userId === user.id) ? baseRadius * 2 : baseRadius;
+    const hRadius = (hasGrosor && snake.userId === user.id) ? headRadius * 2 : headRadius;
+
+    // Draw smoke for overheating
+    if (isOverheated) {
+      smokeParticlesRef.current.forEach(p => {
+        ctx.save();
+        ctx.globalAlpha = p.life * 0.4;
+        ctx.fillStyle = '#888';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5 + (1 - p.life) * 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      });
     }
 
     // Neon glow for the whole snake
@@ -1367,53 +1484,489 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     // Body segments (drawn from tail to head)
     for (let i = trail.length - 1; i >= pointsPerSegment; i -= pointsPerSegment) {
       const segmentIndex = Math.floor(i / pointsPerSegment);
+      const isTail = i >= (trail.length - pointsPerSegment);
       
       // Constant thickness (no tapering)
-      const r = baseRadius;
+      const r = bodyRadius;
       
+      const isSpecialSkin = ['necromancer', 'dragon_fuego'].includes(snake.skinId || '');
+
       if (snake.isBoosting) {
         ctx.fillStyle = Math.random() > 0.5 ? '#fff' : (segmentIndex % 2 === 0 ? snake.color1 : snake.color2);
-        // Aura particles
-        if (Math.random() > 0.8) {
-          ctx.save();
-          ctx.shadowBlur = 5;
-          ctx.fillStyle = '#fff';
-          ctx.beginPath();
-          ctx.arc(trail[i].x + (Math.random() - 0.5) * r * 3, trail[i].y + (Math.random() - 0.5) * r * 3, 2, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
-        }
       } else {
         ctx.fillStyle = segmentIndex % 2 === 0 ? snake.color1 : snake.color2;
       }
 
       ctx.beginPath();
-      ctx.arc(trail[i].x, trail[i].y, r, 0, Math.PI * 2);
-      ctx.fill();
+      if (snake.skinId === 'dragon_fuego') {
+        const rTapered = bodyRadius * (1 - (i / trail.length) * 0.4); 
+        ctx.save();
+        ctx.translate(trail[i].x, trail[i].y);
+        const nextSeg = trail[i - pointsPerSegment] || trail[i];
+        const angle = Math.atan2(nextSeg.y - trail[i].y, nextSeg.x - trail[i].x);
+        ctx.rotate(angle);
+
+        const radius = rTapered;
+        
+        // --- Vector Style Segment ---
+        ctx.lineWidth = radius * 0.2;
+        ctx.strokeStyle = "#000000";
+        ctx.lineJoin = "round";
+
+        // Púas laterales (Hueso)
+        ctx.fillStyle = "#F2D8B3";
+        ctx.beginPath();
+        ctx.moveTo(0, -radius*0.7);
+        ctx.lineTo(-radius*0.8, -radius*1.6);
+        ctx.lineTo(radius*0.4, -radius*0.7);
+        ctx.moveTo(0, radius*0.7);
+        ctx.lineTo(-radius*0.8, radius*1.6);
+        ctx.lineTo(radius*0.4, radius*0.7);
+        ctx.fill(); 
+        ctx.stroke();
+
+        // Círculo principal del cuerpo
+        ctx.fillStyle = "#796B75";
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.fill(); 
+        ctx.stroke();
+
+        // Detalle central oscuro del cuerpo
+        ctx.fillStyle = "#5C4E57";
+        ctx.beginPath();
+        ctx.moveTo(-radius*0.4, -radius*0.5);
+        ctx.lineTo(radius*0.4, 0);
+        ctx.lineTo(-radius*0.4, radius*0.5);
+        ctx.lineTo(-radius*0.6, 0);
+        ctx.closePath();
+        ctx.fill(); 
+        ctx.stroke();
+
+        ctx.restore();
+      } else if (snake.skinId === 'komodo') {
+        const rTapered = bodyRadius * (1 - (i / trail.length) * 0.2); 
+        ctx.save();
+        ctx.translate(trail[i].x, trail[i].y);
+        const nextSeg = trail[i - pointsPerSegment] || trail[i];
+        const angle = Math.atan2(nextSeg.y - trail[i].y, nextSeg.x - trail[i].x);
+        ctx.rotate(angle);
+        
+        const radius = rTapered;
+
+        const bodyGrad = ctx.createLinearGradient(0, -radius, 0, radius);
+        bodyGrad.addColorStop(0, '#1c1714');
+        bodyGrad.addColorStop(0.2, '#3b322a');
+        bodyGrad.addColorStop(0.5, '#6b5e52');
+        bodyGrad.addColorStop(0.8, '#3b322a');
+        bodyGrad.addColorStop(1, '#0d0b09');
+
+        ctx.fillStyle = bodyGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        const drawDorsalScale = (x: number, y: number, r: number, color: string, highlight: string) => {
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+          ctx.beginPath();
+          ctx.moveTo(r * 0.2, 0);
+          ctx.quadraticCurveTo(-r * 0.5, r * 0.8, -r * 0.8, 0);
+          ctx.quadraticCurveTo(-r * 0.5, -r * 0.8, r * 0.2, 0);
+          ctx.fill();
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(r * 0.3, 0);
+          ctx.quadraticCurveTo(-r * 0.3, r * 0.6, -r * 0.6, 0);
+          ctx.quadraticCurveTo(-r * 0.3, -r * 0.6, r * 0.3, 0);
+          ctx.fill();
+          ctx.strokeStyle = highlight;
+          ctx.lineWidth = r * 0.12;
+          ctx.lineCap = "round";
+          ctx.beginPath();
+          ctx.moveTo(-r * 0.1, -r * 0.25);
+          ctx.quadraticCurveTo(-r * 0.25, 0, -r * 0.1, r * 0.25);
+          ctx.stroke();
+          ctx.restore();
+        };
+
+        drawDorsalScale(0, 0, radius, '#29221d', 'rgba(255, 255, 255, 0.15)');
+        drawDorsalScale(-radius*0.15, -radius*0.4, radius*0.6, '#473d34', 'rgba(255, 255, 255, 0.1)');
+        drawDorsalScale(-radius*0.15, radius*0.4, radius*0.6, '#473d34', 'rgba(255, 255, 255, 0.1)');
+        
+        ctx.restore();
+      } else if (snake.skinId === 'necromancer') {
+        // Rib cage look (Bone tail removed as requested)
+        ctx.save();
+        ctx.translate(trail[i].x, trail[i].y);
+        const nextSeg = trail[i - pointsPerSegment] || trail[i];
+        const angle = Math.atan2(nextSeg.y - trail[i].y, nextSeg.x - trail[i].x);
+        ctx.rotate(angle);
+        
+        // Spine
+        ctx.fillStyle = '#e5e7eb';
+        ctx.fillRect(-r/2, -r/4, r, r/2);
+        
+        // Ribs
+        ctx.strokeStyle = '#e5e7eb';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        // Top rib
+        ctx.moveTo(0, -r/4);
+        ctx.quadraticCurveTo(r, -r, 0, -r * 1.2);
+        // Bottom rib
+        ctx.moveTo(0, r/4);
+        ctx.quadraticCurveTo(r, r, 0, r * 1.2);
+        ctx.stroke();
+        ctx.restore();
+      } else if (isSpecialSkin) {
+        // Hexagonal / Spiky look for legendary skins
+        const sides = 6;
+        const angleStep = (Math.PI * 2) / sides;
+        ctx.moveTo(trail[i].x + r * Math.cos(0), trail[i].y + r * Math.sin(0));
+        for (let s = 1; s <= sides; s++) {
+          ctx.lineTo(trail[i].x + r * Math.cos(s * angleStep), trail[i].y + r * Math.sin(s * angleStep));
+        }
+        ctx.closePath();
+        ctx.fill();
+      } else {
+        ctx.arc(trail[i].x, trail[i].y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Draw border for special skins
+      if (isSpecialSkin) {
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Render Tail Emoji
+      if (isTail && snake.tailEmoji) {
+        ctx.save();
+        // Point tail away from the next segment
+        const nextSegment = trail[i - pointsPerSegment] || trail[i];
+        const dx = trail[i].x - nextSegment.x;
+        const dy = trail[i].y - nextSegment.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        
+        // Si es phoenix, lo movemos un poco más atrás para que "flote" fuera del orbe
+        const offset = snake.skinId === 'phoenix' ? r * 1.2 : 0;
+        ctx.translate(trail[i].x + (dx/dist) * offset, trail[i].y + (dy/dist) * offset);
+
+        const tailAngle = Math.atan2(dy, dx) + Math.PI / 2;
+        ctx.rotate(tailAngle);
+        
+        // Fenix Eterno tail emoji should be a bit smaller (r * 1.8 instead of r * 2.5)
+        const emojiSizeMultiplier = snake.skinId === 'phoenix' ? 1.8 : 2.5;
+        ctx.font = `${r * emojiSizeMultiplier}px Arial`;
+        
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(snake.tailEmoji, 0, 0);
+        ctx.restore();
+      }
+
+      if (snake.isBoosting && Math.random() > 0.8) {
+        // Aura particles
+        ctx.save();
+        ctx.shadowBlur = 5;
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(trail[i].x + (Math.random() - 0.5) * r * 3, trail[i].y + (Math.random() - 0.5) * r * 3, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
     }
 
     // Head (always at index 0)
     const head = trail[0];
-    ctx.fillStyle = snake.isBoosting ? '#fff' : snake.color1;
-    ctx.beginPath();
-    ctx.arc(head.x, head.y, headRadius, 0, Math.PI * 2);
-    ctx.fill();
+    
+    if (snake.skinId === 'dragon_fuego') {
+      ctx.save();
+      ctx.translate(head.x, head.y);
+      ctx.rotate(snake.angle);
+
+      const radius = hRadius;
+      const s = radius * 2.2;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+
+      // --- 1. CUERNOS DE HUESO ---
+      const drawHorns = (side: number) => {
+          ctx.save(); 
+          ctx.scale(1, side);
+          ctx.fillStyle = "#F2D8B3";
+          ctx.strokeStyle = "#000000";
+          ctx.lineWidth = s * 0.1;
+
+          // Cuerno Superior Grande (Achicado)
+          ctx.beginPath();
+          ctx.moveTo(-s*0.1, -s*0.3);
+          ctx.quadraticCurveTo(-s*0.3, -s*0.6, -s*0.35, -s*0.9);
+          ctx.quadraticCurveTo(0, -s*0.6, s*0.1, -s*0.4);
+          ctx.fill(); ctx.stroke();
+
+          // Cuerno Medio (Achicado)
+          ctx.beginPath();
+          ctx.moveTo(s*0.1, -s*0.4);
+          ctx.quadraticCurveTo(s*0.05, -s*0.55, 0, -s*0.7);
+          ctx.quadraticCurveTo(s*0.25, -s*0.55, s*0.25, -s*0.4);
+          ctx.fill(); ctx.stroke();
+
+          // Cuerno Pequeño Frontal (Achicado)
+          ctx.beginPath();
+          ctx.moveTo(s*0.3, -s*0.4);
+          ctx.quadraticCurveTo(s*0.25, -s*0.5, s*0.2, -s*0.55);
+          ctx.quadraticCurveTo(s*0.35, -s*0.5, s*0.4, -s*0.4);
+          ctx.fill(); ctx.stroke();
+          ctx.restore();
+      };
+      drawHorns(1); 
+      drawHorns(-1);
+
+      // --- 2. BASE DE LA CABEZA ---
+      ctx.fillStyle = "#796B75"; 
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = s * 0.12; 
+
+      const headShape = new Path2D();
+      headShape.moveTo(-s*0.4, 0);
+      headShape.lineTo(-s*0.5, -s*0.1);
+      headShape.lineTo(-s*0.4, -s*0.2);
+      headShape.lineTo(-s*0.5, -s*0.3);
+      headShape.lineTo(-s*0.3, -s*0.4);
+      headShape.quadraticCurveTo(s*0.1, -s*0.6, s*0.45, -s*0.4);
+      headShape.lineTo(s*0.5, -s*0.2);
+      headShape.lineTo(s*0.8, -s*0.2);
+      headShape.quadraticCurveTo(s*1.1, -s*0.1, s*1.1, 0);
+      headShape.quadraticCurveTo(s*1.1, s*0.1, s*0.8, s*0.2);
+      headShape.lineTo(s*0.5, s*0.2);
+      headShape.lineTo(s*0.45, s*0.4);
+      headShape.quadraticCurveTo(s*0.1, s*0.6, -s*0.3, s*0.4);
+      headShape.lineTo(-s*0.5, s*0.3);
+      headShape.lineTo(-s*0.4, s*0.2);
+      headShape.lineTo(-s*0.5, s*0.1);
+      headShape.closePath();
+
+      ctx.stroke(headShape);
+      ctx.fill(headShape);
+
+      // --- 3. PATRONES OSCUROS ---
+      ctx.fillStyle = "#5C4E57"; 
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = s * 0.08;
+
+      const drawBrow = (side: number) => {
+          ctx.save(); 
+          ctx.scale(1, side);
+          ctx.beginPath();
+          ctx.moveTo(-s*0.2, 0);
+          ctx.lineTo(-s*0.2, -s*0.2);
+          ctx.lineTo(-s*0.3, -s*0.3);
+          ctx.quadraticCurveTo(s*0.1, -s*0.5, s*0.4, -s*0.35);
+          ctx.quadraticCurveTo(s*0.3, -s*0.1, s*0.2, -s*0.15);
+          ctx.quadraticCurveTo(s*0.1, -s*0.3, -s*0.1, -s*0.15);
+          ctx.lineTo(0, 0);
+          ctx.fill(); 
+          ctx.stroke();
+          ctx.restore();
+      };
+      drawBrow(1); 
+      drawBrow(-1);
+
+      // --- 4. LÍNEAS DEL HOCICO ---
+      ctx.beginPath();
+      ctx.moveTo(s*0.2, -s*0.15);
+      ctx.lineTo(s*0.8, -s*0.15);
+      ctx.moveTo(s*0.2, s*0.15);
+      ctx.lineTo(s*0.8, s*0.15);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(s*0.8, -s*0.15);
+      ctx.quadraticCurveTo(s*0.7, 0, s*0.8, s*0.15);
+      ctx.stroke();
+
+      // --- 5. OJOS ---
+      const drawEye = (side: number) => {
+          ctx.save(); 
+          ctx.scale(1, side);
+          ctx.fillStyle = "#F8B81D";
+          ctx.beginPath();
+          ctx.moveTo(s*0.4, -s*0.25);
+          ctx.lineTo(s*0.2, -s*0.1);
+          ctx.lineTo(s*0.35, -s*0.12);
+          ctx.closePath();
+          ctx.fill();
+          
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = "#F8B81D";
+          ctx.fill();
+          ctx.restore();
+      };
+      drawEye(1); 
+      drawEye(-1);
+
+      // --- 6. FOSAS NASALES ---
+      const drawNostril = (side: number) => {
+          ctx.save(); 
+          ctx.scale(1, side);
+          ctx.fillStyle = "#000000";
+          ctx.beginPath();
+          ctx.moveTo(s*0.85, -s*0.08);
+          ctx.quadraticCurveTo(s*1.0, -s*0.15, s*0.95, -s*0.02);
+          ctx.quadraticCurveTo(s*0.9, -s*0.02, s*0.85, -s*0.08);
+          ctx.fill();
+          ctx.restore();
+      };
+      drawNostril(1); 
+      drawNostril(-1);
+      
+      ctx.beginPath();
+      ctx.moveTo(s*0.9, -s*0.25);
+      ctx.quadraticCurveTo(s*1.2, 0, s*0.9, s*0.25);
+      ctx.stroke();
+
+      ctx.restore();
+    } else if (snake.skinId === 'komodo') {
+      ctx.save();
+      ctx.translate(head.x, head.y);
+      ctx.rotate(snake.angle);
+
+      const radius = hRadius;
+      const s = radius * 1.6;
+      
+      const time = Date.now() * 0.005;
+      const flicker = Math.sin(time);
+      if (Math.sin(time * 0.4) > 0.4) { 
+          ctx.strokeStyle = "#e8c39e"; 
+          ctx.lineWidth = 3; 
+          ctx.beginPath();
+          ctx.moveTo(s, 0);
+          ctx.lineTo(s * 1.4 + flicker * s * 0.2, 0);
+          ctx.lineTo(s * 1.7 + flicker * s * 0.3, -s * 0.2);
+          ctx.moveTo(s * 1.4 + flicker * s * 0.2, 0);
+          ctx.lineTo(s * 1.7 + flicker * s * 0.3, s * 0.2);
+          ctx.stroke();
+      }
+
+      const headPath = new Path2D();
+      headPath.moveTo(-s * 0.2, -s * 0.7); 
+      headPath.quadraticCurveTo(s * 0.4, -s * 0.8, s * 0.8, -s * 0.5); 
+      headPath.lineTo(s * 1.4, -s * 0.25); 
+      headPath.quadraticCurveTo(s * 1.6, 0, s * 1.4, s * 0.25); 
+      headPath.lineTo(s * 0.8, s * 0.5); 
+      headPath.quadraticCurveTo(s * 0.4, s * 0.8, -s * 0.2, s * 0.7); 
+      headPath.closePath();
+
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.7)';
+      ctx.shadowBlur = 15;
+      ctx.shadowOffsetY = 10;
+      
+      const headGrad = ctx.createRadialGradient(s * 0.5, 0, 0, s * 0.5, 0, s * 1.5);
+      headGrad.addColorStop(0, '#6b5e52'); 
+      headGrad.addColorStop(0.6, '#3b322a'); 
+      headGrad.addColorStop(1, '#1c1714'); 
+
+      ctx.fillStyle = headGrad;
+      ctx.fill(headPath);
+      ctx.shadowColor = 'transparent';
+
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.4)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0); ctx.lineTo(s * 1.3, 0);
+      ctx.moveTo(s * 0.3, 0); ctx.quadraticCurveTo(s*0.5, -s*0.2, s * 0.7, -s * 0.5);
+      ctx.moveTo(s * 0.3, 0); ctx.quadraticCurveTo(s*0.5, s*0.2, s * 0.7, s * 0.5);
+      ctx.moveTo(s * 0.9, 0); ctx.lineTo(s * 1.2, -s * 0.15);
+      ctx.moveTo(s * 0.9, 0); ctx.lineTo(s * 1.2, s * 0.15);
+      ctx.stroke();
+
+      const eyeX = s * 0.65;
+      const eyeY = s * 0.45;
+      [1, -1].forEach(side => {
+          ctx.save();
+          ctx.translate(eyeX, side * eyeY);
+          ctx.rotate(side * 0.1); 
+          
+          ctx.fillStyle = "#0a0807";
+          ctx.beginPath();
+          ctx.ellipse(0, 0, s*0.25, s*0.18, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          const iris = ctx.createRadialGradient(0, 0, 0, 0, 0, s*0.2);
+          iris.addColorStop(0, "#c29129");
+          iris.addColorStop(0.5, "#7a560e");
+          iris.addColorStop(1, "#291c01");
+          ctx.fillStyle = iris;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, s*0.2, s*0.14, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = "#000000";
+          ctx.beginPath();
+          ctx.ellipse(0, 0, s*0.07, s*0.07, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+          ctx.beginPath();
+          ctx.ellipse(s*0.06, -s*0.05, s*0.05, s*0.03, -Math.PI/4, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.restore();
+      });
+
+      [1, -1].forEach(side => {
+          ctx.fillStyle = "#000000";
+          ctx.beginPath();
+          ctx.ellipse(s * 1.35, side * s * 0.15, s*0.06, s*0.04, side * 0.3, 0, Math.PI * 2);
+          ctx.fill();
+      });
+
+      ctx.restore();
+    } else {
+      ctx.fillStyle = snake.isBoosting ? '#fff' : snake.color1;
+      ctx.beginPath();
+      ctx.arc(head.x, head.y, hRadius, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     ctx.shadowBlur = 0; // Reset shadow for eyes/emoji
 
-    // Emoji Head support
-    if (snake.skinEmoji && snake.skinEmoji !== '🟢') {
+    // Emoji Head support (Skip eyes/emoji if we just drew the realistic head)
+    if (!['dragon_fuego', 'komodo'].includes(snake.skinId || '') && snake.skinEmoji && snake.skinEmoji !== '🟢') {
       ctx.save();
       ctx.translate(head.x, head.y);
-      ctx.rotate(snake.angle + Math.PI / 2);
-      ctx.font = `${headRadius * 2.2}px Arial`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(snake.skinEmoji, 0, 0);
+      
+      if (snake.skinId === 'phoenix') {
+        // Doble emoji de fuego para el Fénix Eterno
+        const angles = [snake.angle + (60 * Math.PI / 180), snake.angle + (120 * Math.PI / 180)];
+        ctx.font = `${hRadius * 2.2}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        angles.forEach(angle => {
+          ctx.save();
+          ctx.rotate(angle);
+          ctx.fillText(snake.skinEmoji, 0, 0);
+          ctx.restore();
+        });
+      } else {
+        let emojiAngle = snake.angle + Math.PI / 2;
+        if (snake.skinId === 'water_eternal') {
+          emojiAngle += Math.PI; // Invert droplet
+        }
+        ctx.rotate(emojiAngle);
+        ctx.font = `${hRadius * 2.2}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(snake.skinEmoji, 0, 0);
+      }
       ctx.restore();
     } else {
       // Eyes (only if no emoji)
-      const eyeOff = CELL / 4;
+      const eyeOff = (hasGrosor && snake.userId === user.id) ? CELL / 2 : CELL / 4;
       const ex1 = head.x + Math.cos(snake.angle - 0.5) * eyeOff;
       const ey1 = head.y + Math.sin(snake.angle - 0.5) * eyeOff;
       const ex2 = head.x + Math.cos(snake.angle + 0.5) * eyeOff;
@@ -1427,7 +1980,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
     ctx.fillStyle = 'white';
     ctx.font = 'bold 12px Arial';
     ctx.textAlign = 'center';
-    ctx.fillText(snake.displayName, head.x, head.y - 15 - baseRadius);
+    ctx.fillText(snake.displayName, head.x, head.y - 15 - bodyRadius);
     ctx.restore();
   };
 
@@ -1609,7 +2162,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
       </div>
 
       {/* Ability Buttons Section */}
-      <div className="absolute bottom-6 left-4 z-[70] flex flex-col gap-3 pointer-events-auto">
+      <div className="absolute bottom-6 left-4 z-[70] flex flex-row items-end gap-4 pointer-events-auto">
         {hasTeleport && (
           <div className="relative">
             <button
@@ -1628,45 +2181,34 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
           </div>
         )}
 
-        {hasStop && (
+        {hasBoostCooldown && (
           <div className="relative">
             <button
-              onClick={() => setIsStopped(!isStopped)}
-              className={`flex h-12 w-12 items-center justify-center rounded-2xl border-2 transition-all active:scale-95 ${isStopped ? 'border-red-500 bg-red-500 text-white shadow-lg shadow-red-500/40' : 'border-gray-700 bg-gray-800/80 text-gray-400 hover:border-gray-500'}`}
+              onMouseDown={() => !isOverheated && setIsBoosting(true)}
+              onMouseUp={() => setIsBoosting(false)}
+              onMouseLeave={() => setIsBoosting(false)}
+              onTouchStart={(e) => { e.preventDefault(); !isOverheated && setIsBoosting(true); }}
+              onTouchEnd={() => setIsBoosting(false)}
+              className={`flex h-16 w-16 items-center justify-center rounded-full border-4 transition-all active:scale-95 ${isOverheated ? 'border-red-600 bg-red-900/50 text-red-500 cursor-not-allowed' : (isBoosting ? 'border-blue-400 bg-blue-500 text-white shadow-lg shadow-blue-500/50' : 'border-blue-600 bg-blue-900/30 text-blue-400')}`}
             >
-              <div className="h-4 w-4 bg-current rounded-sm" />
+              <Zap size={32} className={isBoosting ? 'animate-pulse' : ''} />
+              <svg className="absolute inset-0 -rotate-90" viewBox="0 0 100 100">
+                <circle
+                  cx="50" cy="50" r="45"
+                  fill="none" stroke="currentColor" strokeWidth="4"
+                  strokeDasharray={`${(boostCharge / 5) * 283} 283`}
+                  className="transition-all duration-100"
+                />
+              </svg>
             </button>
-            <span className="mt-1 block text-center text-[8px] font-black uppercase text-white/50">Parar</span>
-          </div>
-        )}
-
-        {hasAutopilot && (
-          <div className="relative">
-            <button
-              onClick={() => setIsAutopilot(!isAutopilot)}
-              className={`flex h-12 w-12 items-center justify-center rounded-2xl border-2 transition-all active:scale-95 ${isAutopilot ? 'border-green-500 bg-green-500/20 text-green-400 shadow-lg shadow-green-500/20' : 'border-gray-700 bg-gray-800/80 text-gray-400 hover:border-gray-500'}`}
-            >
-              <Target size={24} />
-            </button>
-            <span className="mt-1 block text-center text-[8px] font-black uppercase text-white/50">Auto</span>
+            <span className={`mt-2 block text-center text-[10px] font-black uppercase ${isOverheated ? 'text-red-500 animate-bounce' : 'text-blue-400'}`}>
+              {isOverheated ? `RECALENTADO (${Math.ceil(cooldownTime)}s)` : 'IMPULSO'}
+            </span>
           </div>
         )}
       </div>
 
-      {/* Floating Texts */}
-      <div className="pointer-events-none fixed inset-0 z-[100]">
-        {floatingTexts.map(ft => (
-          <motion.div
-            key={ft.id}
-            initial={{ opacity: 1, y: ft.y }}
-            animate={{ opacity: 0, y: ft.y - 100 }}
-            className="absolute font-black text-xs uppercase tracking-widest whitespace-nowrap"
-            style={{ left: ft.x, color: ft.color }}
-          >
-            {ft.text}
-          </motion.div>
-        ))}
-      </div>
+      {/* Floating Texts (Moved to Canvas) */}
 
       {/* Chat System */}
       <div className="absolute bottom-4 left-4 z-50 flex flex-col gap-2">
@@ -1688,7 +2230,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
               </div>
               <div className="flex-1 overflow-y-auto space-y-3 pr-1 custom-scrollbar">
                 {messages.map((msg, idx) => (
-                  <div key={`msg-${msg.id}-${idx}`} className="flex items-start gap-2 text-sm">
+                  <div key={`msg-v11-${msg.id || idx}-${idx}`} className="flex items-start gap-2 text-sm">
                     {msg.avatarConfig ? (
                       <img 
                         src={`https://api.dicebear.com/7.x/${msg.avatarConfig.style}/svg?seed=${msg.avatarConfig.seed}`}
@@ -1738,7 +2280,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         <AnimatePresence mode="popLayout">
           {kills.map((kill, idx) => (
             <motion.div
-              key={`kill-${kill.id}-${idx}`}
+              key={`kill-v11-${kill.id || idx}-${idx}`}
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: 20 }}

@@ -4,7 +4,18 @@ export const WORLD_W = 3000;
 export const WORLD_H = 3000;
 export const BASE_SPEED = 130;
 export const CELL = 24;
-export const SEGMENT_DISTANCE = 5; // Distance between segments for better fluidity and separation
+export const SEGMENT_DISTANCE = 5; 
+export const APP_VERSION = "1.1.4"; // Increment this to force user cache refresh
+
+export function compareVersions(v1: string, v2: string) {
+  const parts1 = v1.split('.').map(Number);
+  const parts2 = v2.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (parts1[i] > (parts2[i] || 0)) return 1;
+    if (parts1[i] < (parts2[i] || 0)) return -1;
+  }
+  return 0;
+}
 
 export const ALL_SKINS: Skin[] = [
   { id: 'default', name: 'Default', icon: '🟢', rarity: 'common', colors: ['#22ff44', '#11cc33'] },
@@ -14,18 +25,17 @@ export const ALL_SKINS: Skin[] = [
   { id: 'cloud', name: 'Celeste', icon: '🔵', rarity: 'common', colors: ['#aaccee', '#88aacc'] },
   { id: 'stone', name: 'Rosa', icon: '🔴', rarity: 'common', colors: ['#ff69b4', '#ff1493'] },
   { id: 'ice', name: 'Negro', icon: '⚫', rarity: 'rare', colors: ['#000000', '#222222'] },
-  { id: 'fire', name: 'Bordo', icon: '🟤', rarity: 'rare', colors: ['#800000', '#4d0000'] },
   { id: 'electric', name: 'Amarillo', icon: '🟡', rarity: 'rare', colors: ['#ffff22', '#cccc00'] },
   { id: 'toxic', name: 'Blanco', icon: '⚪', rarity: 'rare', colors: ['#ffffff', '#eeeeee'] },
   { id: 'sakura', name: 'Marrón', icon: '🟤', rarity: 'rare', colors: ['#8b4513', '#5d2e0d'] },
   { id: 'mint', name: 'Azul Marino', icon: '🔵', rarity: 'rare', colors: ['#000080', '#000060'] },
   { id: 'galaxy', name: 'Agotado', icon: '🫩', rarity: 'epic', colors: ['#8844ff', '#5522cc'] },
-  { id: 'dragon', name: 'Ruborizado', icon: '😊', rarity: 'epic', colors: ['#fcd34d', '#f59e0b'] },
+  { id: 'blushed', name: 'Ruborizado', icon: '😊', rarity: 'epic', colors: ['#fcd34d', '#f59e0b'] },
   { id: 'aurora', name: 'Risa Loca', icon: '😆', rarity: 'epic', colors: ['#fcd34d', '#f59e0b'] },
   { id: 'phantom', name: 'Sorpresa', icon: '😮', rarity: 'epic', colors: ['#aaaaff', '#6666cc'] },
   { id: 'golden', name: 'Millonario', icon: '🤑', rarity: 'legendary', colors: ['#ffd700', '#cc9900'], price: 15000 },
   { id: 'cosmic', name: 'Náuseas', icon: '🤢', rarity: 'legendary', colors: ['#44ff88', '#22cc55'] },
-  { id: 'void', name: 'Oscuro', icon: '🕳️', rarity: 'legendary', colors: ['#222244', '#8844ff'] },
+  { id: 'void', name: 'Alienígena', icon: '👽', rarity: 'legendary', colors: ['#222244', '#8844ff'] },
   { id: 'rainbow', name: 'Serio', icon: '😑', rarity: 'legendary', colors: ['#9ca3af', '#4b5563'] },
   { id: 'emoji_laugh', name: 'Risa Suprema', icon: '😂', rarity: 'legendary', colors: ['#fcd34d', '#f59e0b'] },
   { id: 'emoji_love', name: 'Amor Infinito', icon: '😍', rarity: 'legendary', colors: ['#f87171', '#dc2626'] },
@@ -43,7 +53,11 @@ export const ALL_SKINS: Skin[] = [
   { id: 'moon_skin', name: 'Luna Llena', icon: '🌝', rarity: 'common', colors: ['#fdfd96', '#f4f4f4'], price: 500, currency: 'monedas' },
   { id: 'sun_skin', name: 'Sol Radiante', icon: '🌞', rarity: 'common', colors: ['#ffcc33', '#ff9900'], price: 500, currency: 'monedas' },
   { id: 'earth_skin', name: 'Planeta Tierra', icon: '🌍', rarity: 'common', colors: ['#4b9cd3', '#228b22'], price: 500, currency: 'monedas' },
-  { id: 'phoenix', name: 'Fénix Eterno', icon: '🔥', rarity: 'legendary', colors: ['#ff0000', '#ffcc00'], price: 1000, currency: 'monedas', hasAura: true, auraType: 'fire' },
+  { id: 'phoenix', name: 'Fénix Eterno', icon: '🔥', tailIcon: '🔥', rarity: 'legendary', colors: ['#ff0000', '#ffcc00'], price: 1000, currency: 'monedas', hasAura: true, auraType: 'fire' },
   { id: 'glacier', name: 'Glaciar Eterno', icon: '❄️', rarity: 'legendary', colors: ['#00ffff', '#ffffff'], price: 1000, currency: 'monedas', hasAura: true, auraType: 'ice' },
   { id: 'lightning', name: 'Rayo Eterno', icon: '⚡', rarity: 'legendary', colors: ['#ffff00', '#ffffff'], price: 1000, currency: 'monedas', hasAura: true, auraType: 'lightning' },
+  { id: 'water_eternal', name: 'Agua Vital', icon: '💧', rarity: 'legendary', colors: ['#3b82f6', '#1e40af'], price: 1000, currency: 'monedas', hasAura: true, auraType: 'water' },
+  { id: 'necromancer', name: 'Puro Huesos', icon: '💀', rarity: 'legendary', colors: ['#4b5563', '#064e3b'], price: 2000, currency: 'monedas', hasAura: true, auraType: 'death' },
+  { id: 'dragon_fuego', name: 'Dragon Vermit', icon: '🐲', rarity: 'legendary', colors: ['#796B75', '#F2D8B3'], price: 5000, currency: 'monedas', hasAura: true, auraType: 'fire' },
+  { id: 'komodo', name: 'Dragón de Komodo', icon: '🦎', rarity: 'epic', colors: ['#3b322a', '#6b5e52'], price: 5000, currency: 'monedas' },
 ];

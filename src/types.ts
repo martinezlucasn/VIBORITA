@@ -16,6 +16,8 @@ export interface User {
   highScore: number;
   highScoreMonedas: number;
   lastActive: number;
+  isGuest?: boolean;
+  guestId?: string;
   usernameSet?: boolean;
   proAccessUntil?: number;
   millonarioAccessUntil?: number;
@@ -84,8 +86,12 @@ export interface PlayerSession {
   skinEmoji?: string;
   isBoosting?: boolean;
   hasAura?: boolean;
-  auraType?: 'fire' | 'ice' | 'lightning';
+  auraType?: 'fire' | 'ice' | 'lightning' | 'water' | 'death' | 'crystal' | 'ember' | 'nebula';
+  skinId?: string;
+  tailEmoji?: string;
   serverId?: string;
+  lastAIUpdate?: number;
+  targetFood?: Food | null;
 }
 
 export interface Food {
@@ -112,12 +118,13 @@ export interface Skin {
   id: string;
   name: string;
   icon: string;
+  tailIcon?: string;
   rarity: 'common' | 'rare' | 'epic' | 'legendary';
   colors: [string, string];
   price?: number;
   currency?: 'coins' | 'monedas';
   hasAura?: boolean;
-  auraType?: 'fire' | 'ice' | 'lightning';
+  auraType?: 'fire' | 'ice' | 'lightning' | 'water' | 'death' | 'crystal' | 'ember' | 'nebula';
 }
 
 export interface ChatMessage {

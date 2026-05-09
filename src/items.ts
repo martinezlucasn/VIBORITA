@@ -17,7 +17,6 @@ export const ARENA_ITEMS: ArenaItem[] = [
   { id: 'item_cyan', name: 'Celeste', type: 'color', value: '#aaccee', rarity: 'common', skinId: 'cloud' },
   { id: 'item_red', name: 'Rojo', type: 'color', value: '#ff69b4', rarity: 'common', skinId: 'stone' },
   { id: 'item_black', name: 'Negro', type: 'color', value: '#000000', rarity: 'common', skinId: 'ice' },
-  { id: 'item_maroon', name: 'Bordo', type: 'color', value: '#800000', rarity: 'common', skinId: 'fire' },
   { id: 'item_yellow', name: 'Amarillo', type: 'color', value: '#ffff22', rarity: 'common', skinId: 'electric' },
   { id: 'item_white', name: 'Blanco', type: 'color', value: '#ffffff', rarity: 'common', skinId: 'toxic' },
   { id: 'item_brown', name: 'Marrón', type: 'color', value: '#8b4513', rarity: 'common', skinId: 'sakura' },
@@ -25,12 +24,11 @@ export const ARENA_ITEMS: ArenaItem[] = [
 
   // RARE (Emojis from Agotado to Bromista)
   { id: 'item_agotado', name: 'Agotado', type: 'emoji', value: '🫩', rarity: 'rare', skinId: 'galaxy' },
-  { id: 'item_ruborizado', name: 'Ruborizado', type: 'emoji', value: '😊', rarity: 'rare', skinId: 'dragon' },
   { id: 'item_risa_loca', name: 'Risa Loca', type: 'emoji', value: '😆', rarity: 'rare', skinId: 'aurora' },
   { id: 'item_sorpresa', name: 'Sorpresa', type: 'emoji', value: '😮', rarity: 'rare', skinId: 'phantom' },
   { id: 'item_millonario', name: 'Millonario', type: 'emoji', value: '🤑', rarity: 'rare', skinId: 'golden' },
   { id: 'item_nauseas', name: 'Náuseas', type: 'emoji', value: '🤢', rarity: 'rare', skinId: 'cosmic' },
-  { id: 'item_oscuro', name: 'Oscuro', type: 'emoji', value: '🕳️', rarity: 'rare', skinId: 'void' },
+  { id: 'item_oscuro', name: 'Alienígena', type: 'emoji', value: '👽', rarity: 'rare', skinId: 'void' },
   { id: 'item_serio', name: 'Serio', type: 'emoji', value: '😑', rarity: 'rare', skinId: 'rainbow' },
   { id: 'item_risa_suprema', name: 'Risa Suprema', type: 'emoji', value: '😂', rarity: 'rare', skinId: 'emoji_laugh' },
   { id: 'item_amor_infinito', name: 'Amor Infinito', type: 'emoji', value: '😍', rarity: 'rare', skinId: 'emoji_love' },
@@ -55,13 +53,13 @@ export const ARENA_ITEMS: ArenaItem[] = [
   { id: 'item_fenix_eterno', name: 'Fénix Eterno', type: 'emoji', value: '🔥', rarity: 'legendary', skinId: 'phoenix' },
   { id: 'item_glaciar_eterno', name: 'Glaciar Eterno', type: 'emoji', value: '❄️', rarity: 'legendary', skinId: 'glacier' },
   { id: 'item_rayo_eterno', name: 'Rayo Eterno', type: 'emoji', value: '⚡', rarity: 'legendary', skinId: 'lightning' },
-  
-  // ABILITY FRAGMENTS
+  { id: 'item_agua_vital', name: 'Agua Vital', type: 'emoji', value: '💧', rarity: 'legendary', skinId: 'water_eternal' },
+  { id: 'item_necromancer', name: 'Puro Huesos', type: 'emoji', value: '💀', rarity: 'legendary', skinId: 'necromancer' },
   { id: 'frag_zoom', name: 'Fragmento de Zoom', type: 'emoji', value: '🔍', rarity: 'rare', skinId: 'ability_zoom' },
   { id: 'frag_teleport', name: 'Fragmento de Teletransporte', type: 'emoji', value: '🌀', rarity: 'legendary', skinId: 'ability_teleport' },
-  { id: 'frag_stop', name: 'Fragmento de Parar', type: 'emoji', value: '🛑', rarity: 'common', skinId: 'ability_stop' },
   { id: 'frag_magnet', name: 'Fragmento de Imán', type: 'emoji', value: '🧲', rarity: 'epic', skinId: 'ability_magnet' },
-  { id: 'frag_autopilot', name: 'Fragmento de Autopilot', type: 'emoji', value: '🤖', rarity: 'legendary', skinId: 'ability_autopilot' },
+  { id: 'frag_grosor', name: 'Fragmento de Grosor', type: 'emoji', value: '🍕', rarity: 'rare', skinId: 'ability_grosor' },
+  { id: 'frag_boost', name: 'Fragmento de Súper Impulso', type: 'emoji', value: '🚨', rarity: 'legendary', skinId: 'ability_boost_cooldown' },
 ];
 
 export const SUCCESS_RATES: Record<Rarity, number> = {

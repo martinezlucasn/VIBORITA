@@ -201,28 +201,52 @@ export default function ProfileCustomization({ user, onClose, onUpdate }: Profil
                     ))}
                   </div>
 
-                  <button 
-                    onClick={async () => {
-                      setIsSaving(true);
-                      try {
-                        const userRef = doc(db, 'users', user.id);
-                        await updateDoc(userRef, {
-                          avatarConfig: { style: avatarStyle, seed: avatarSeed }
-                        });
-                        onUpdate();
-                        setMessage({ text: 'Avatar guardado', type: 'success' });
-                      } catch (e) {
-                        handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id);
-                      } finally {
-                        setIsSaving(false);
-                        setTimeout(() => setMessage(null), 3000);
-                      }
-                    }}
-                    disabled={isSaving}
-                    className="w-full rounded-2xl bg-blue-600 py-4 font-black uppercase tracking-widest text-white shadow-xl shadow-blue-600/30 hover:bg-blue-500 transition-all disabled:opacity-50"
-                  >
-                    {isSaving ? 'Guardando...' : 'Aplicar Avatar'}
-                  </button>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button 
+                      onClick={async () => {
+                        setIsSaving(true);
+                        try {
+                          const userRef = doc(db, 'users', user.id);
+                          await updateDoc(userRef, {
+                            avatarConfig: null
+                          });
+                          onUpdate();
+                          setMessage({ text: 'Avatar eliminado', type: 'success' });
+                        } catch (e) {
+                          handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id);
+                        } finally {
+                          setIsSaving(false);
+                          setTimeout(() => setMessage(null), 3000);
+                        }
+                      }}
+                      disabled={isSaving || !user.avatarConfig}
+                      className="rounded-2xl bg-white/5 py-4 font-black uppercase tracking-widest text-gray-400 hover:bg-white/10 transition-all disabled:opacity-30 border border-white/5"
+                    >
+                      Quitar
+                    </button>
+                    <button 
+                      onClick={async () => {
+                        setIsSaving(true);
+                        try {
+                          const userRef = doc(db, 'users', user.id);
+                          await updateDoc(userRef, {
+                            avatarConfig: { style: avatarStyle, seed: avatarSeed }
+                          });
+                          onUpdate();
+                          setMessage({ text: 'Avatar guardado', type: 'success' });
+                        } catch (e) {
+                          handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id);
+                        } finally {
+                          setIsSaving(false);
+                          setTimeout(() => setMessage(null), 3000);
+                        }
+                      }}
+                      disabled={isSaving}
+                      className="rounded-2xl bg-blue-600 py-4 font-black uppercase tracking-widest text-white shadow-xl shadow-blue-600/30 hover:bg-blue-500 transition-all disabled:opacity-50"
+                    >
+                      {isSaving ? '...' : 'Aplicar'}
+                    </button>
+                  </div>
                 </motion.div>
               )}
 

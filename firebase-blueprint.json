@@ -235,6 +235,17 @@
         "updateMessage": { "type": "string" }
       },
       "required": ["version", "minVersion", "downloadUrl"]
+    },
+    "CTFRoom": {
+      "title": "CTFRoom",
+      "description": "Game room for Capture the Flag",
+      "type": "object",
+      "properties": {
+        "betAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["waiting", "playing", "finished"] },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["betAmount", "status", "updatedAt"]
     }
   },
   "firestore": {
@@ -297,6 +308,10 @@
     "/abilitySales/{listingId}": {
       "schema": "AbilityListing",
       "description": "Ability marketplace listings"
+    },
+    "/ctf_rooms/{roomId}": {
+      "schema": "CTFRoom",
+      "description": "Capture the flag game instances"
     }
   }
 }

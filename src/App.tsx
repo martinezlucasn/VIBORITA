@@ -6,35 +6,29 @@ import { doc, getDoc, setDoc, onSnapshot, updateDoc, increment } from 'firebase/
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
 import { supabase } from './lib/supabase';
 import { User } from './types';
+import { APP_VERSION, ALL_SKINS, compareVersions } from './constants';
 import Menu from './components/Menu';
 import Arena from './components/Arena';
 import TrainingArena from './components/TrainingArena';
 import WagerArena from './components/WagerArena';
+import CaptureTheFlagArena from './components/CaptureTheFlagArena';
 import { motion, AnimatePresence } from 'motion/react';
-import { LogIn, Loader2, ShieldCheck, X, Download, AlertCircle } from 'lucide-react';
+import { LogIn, Loader2, ShieldCheck, X, Download, AlertCircle, User as UserIcon } from 'lucide-react';
 import { soundManager } from './lib/sounds';
 
-const APP_VERSION = '1.0.0';
-
-function compareVersions(v1: string, v2: string) {
-  const parts1 = v1.split('.').map(Number);
-  const parts2 = v2.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    if (parts1[i] > (parts2[i] || 0)) return 1;
-    if (parts1[i] < (parts2[i] || 0)) return -1;
-  }
-  return 0;
-}
+const soundManagerInstance = soundManager; // Use the imported soundManager
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [gameState, setGameState] = useState<'menu' | 'playing' | 'training' | 'wager'>('menu');
+  const [gameState, setGameState] = useState<'menu' | 'playing' | 'training' | 'wager' | 'ctf'>('menu');
   const [wager, setWager] = useState(0);
+  const [ctfRoomId, setCtfRoomId] = useState<string | null>(null);
   const [growthWager, setGrowthWager] = useState(0);
   const [wagerCategory, setWagerCategory] = useState<string>('basica');
   const [botCount, setBotCount] = useState(1);
   const [trainingWager, setTrainingWager] = useState(0);
+  const [trainingServerId, setTrainingServerId] = useState<string>('training_default');
   const [lastRivalId, setLastRivalId] = useState<string | null>(null);
   const [quotaExceeded, setQuotaExceeded] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
@@ -47,6 +41,7 @@ export default function App() {
     // Version check
     const checkVersion = async () => {
       try {
+        // Use getDoc which attempts cache first if enabled
         const configSnap = await getDoc(doc(db, 'app_config', 'current'));
         if (configSnap.exists()) {
           const config = configSnap.data();
@@ -57,7 +52,13 @@ export default function App() {
           }
         }
       } catch (err) {
-        console.error('Error checking app version:', err);
+        // If offline, we just log a warning instead of a full error to avoid scaring the user
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        if (errorMessage.includes('offline') || errorMessage.includes('unavailable')) {
+          console.warn('App version check skipped (currently offline/unavailable)');
+        } else {
+          console.error('Error checking app version:', err);
+        }
       }
     };
     checkVersion();
@@ -91,8 +92,38 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    // Hide status bar for full screen experience
-    if (Capacitor.isNativePlatform()) {
+    // Safety timeout to prevent permanent loading loop
+    const safetyTimeout = setTimeout(() => {
+      if (loading) {
+        console.warn("Safety timeout reached, forcing loading to false");
+        setLoading(false);
+      }
+    }, 8000);
+
+    return () => clearTimeout(safetyTimeout);
+  }, [loading]);
+
+  useEffect(() => {
+      const currentStoredVersion = localStorage.getItem('viborita_app_version');
+      
+      if (currentStoredVersion !== APP_VERSION) {
+        console.log(`Version mismatch: ${currentStoredVersion} vs ${APP_VERSION}. Forcing refresh...`);
+        localStorage.setItem('viborita_app_version', APP_VERSION);
+        
+        // Clear caches if supported
+        if ('caches' in window) {
+          caches.keys().then((names) => {
+            for (const name of names) caches.delete(name);
+          });
+        }
+        
+        // Force reload without cache
+        window.location.reload();
+        return;
+      }
+
+      // Hide status bar for full screen experience
+      if (Capacitor.isNativePlatform()) {
       StatusBar.hide().catch(err => console.warn('Could not hide status bar', err));
     }
 
@@ -113,109 +144,152 @@ export default function App() {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        const userDocRef = doc(db, 'users', firebaseUser.uid);
-        
-        // Update presence
-        const updatePresence = () => {
-          updateDoc(userDocRef, { lastActive: Date.now() })
-            .catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + firebaseUser.uid));
-        };
-        updatePresence();
-        const presenceInterval = setInterval(updatePresence, 60000);
+      try {
+        if (firebaseUser) {
+          const userDocRef = doc(db, 'users', firebaseUser.uid);
+          
+          // Update presence
+          const updatePresence = () => {
+            updateDoc(userDocRef, { lastActive: Date.now() })
+              .catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + firebaseUser.uid));
+          };
+          updatePresence();
+          const presenceInterval = setInterval(updatePresence, 60000);
 
-        // Listen for real-time updates to user data
-        const unsubUser = onSnapshot(userDocRef, async (docSnap) => {
-          if (docSnap.exists()) {
-            const userData = docSnap.data() as User;
-            setUser({ id: docSnap.id, email: firebaseUser.email || '', ...userData } as User);
-            
-            // Sync with Supabase (Firestore is the source of truth)
-            await supabase.from('profiles').upsert({
-              id: firebaseUser.uid,
-              display_name: userData.displayName || 'Player',
-              email: firebaseUser.email || '',
-              coins: userData.coins || 0,
-              monedas: userData.monedas || 0,
-              equipped_skin: userData.equippedSkin || 'default',
-              high_score: userData.highScore || 0,
-              high_score_monedas: userData.highScoreMonedas || 0,
-              last_active: new Date(userData.lastActive).toISOString(),
-              updated_at: new Date().toISOString()
-            });
-          } else {
-            // Check if we already have a user in state to avoid overwriting with 0s
-            // if this is a transient "not found" state or if the user was just created
-            setUser(prev => {
-              if (prev && prev.id === firebaseUser.uid) {
-                console.warn("User document missing in Firestore, but we have it in state. Not recreating to avoid reset.");
-                return prev;
-              }
+          // Listen for real-time updates to user data
+          const unsubUser = onSnapshot(userDocRef, async (docSnap) => {
+            try {
+              if (docSnap.exists()) {
+                const userData = docSnap.data() as User;
+                
+                // DATA MIGRATION: Remove retired skin 'cosmic_cat' (Virus)
+                let needsUpdate = false;
+                const updatePayload: any = {};
 
-              // Create new user if truly doesn't exist
-              const newUser: User = {
-                id: firebaseUser.uid,
-                displayName: firebaseUser.displayName || 'Player',
-                email: (firebaseUser.email || '').toLowerCase(),
-                coins: 0,
-                monedas: 0,
-                botKills: 0,
-                insomniaCount: 0,
-                highScoreMonedas: 0,
-                ownedSkins: ['default'],
-                equippedSkin: 'default',
-                equippedAbilities: [],
-                inventoryAbilities: {},
-                highScore: 0,
-                lastActive: Date.now()
-              };
-              
-              // Only create if we are not in the middle of a deletion
-              if (!sessionStorage.getItem('deleting_account')) {
-                setDoc(userDocRef, newUser, { merge: true })
-                  .catch(e => handleFirestoreError(e, OperationType.CREATE, 'users/' + firebaseUser.uid));
-                  
-                // Create Supabase profile
-                (async () => {
-                  try {
-                    await supabase.from('profiles').upsert({
-                      id: firebaseUser.uid,
-                      display_name: newUser.displayName,
-                      email: newUser.email.toLowerCase(),
-                      coins: newUser.coins,
-                      monedas: newUser.monedas,
-                      equipped_skin: newUser.equippedSkin,
-                      high_score: newUser.highScore,
-                      high_score_monedas: newUser.highScoreMonedas,
-                      last_active: new Date(newUser.lastActive).toISOString(),
-                      created_at: new Date().toISOString(),
-                      updated_at: new Date().toISOString()
-                    });
+                if (userData.equippedSkin === 'cosmic_cat') {
+                  userData.equippedSkin = 'default';
+                  updatePayload.equippedSkin = 'default';
+                  needsUpdate = true;
+                }
 
-                    // Add initial skin to inventory
-                    await supabase.from('inventory').upsert({
-                      user_id: firebaseUser.uid,
-                      skin_id: 'default',
-                      acquired_at: new Date().toISOString()
-                    });
-                  } catch (err) {
-                    console.error("Error syncing with Supabase on creation:", err);
+                if (userData.ownedSkins?.includes('cosmic_cat')) {
+                  userData.ownedSkins = userData.ownedSkins.filter(s => s !== 'cosmic_cat');
+                  updatePayload.ownedSkins = userData.ownedSkins;
+                  needsUpdate = true;
+                }
+
+                if (userData.inventoryItems?.['item_cosmic_cat']) {
+                  const newItems = { ...userData.inventoryItems };
+                  delete newItems['item_cosmic_cat'];
+                  userData.inventoryItems = newItems;
+                  updatePayload.inventoryItems = newItems;
+                  needsUpdate = true;
+                }
+
+                if (needsUpdate) {
+                  // Silently update Firestore to clean up retired assets
+                  updateDoc(userDocRef, updatePayload).catch(() => {});
+                }
+
+                setUser({ id: docSnap.id, email: firebaseUser.email || '', ...userData } as User);
+                
+                // Sync with Supabase (Firestore is the source of truth)
+                await supabase.from('profiles').upsert({
+                  id: firebaseUser.uid,
+                  display_name: userData.displayName || 'Player',
+                  email: firebaseUser.email || '',
+                  coins: userData.coins || 0,
+                  monedas: userData.monedas || 0,
+                  equipped_skin: userData.equippedSkin || 'default',
+                  high_score: userData.highScore || 0,
+                  high_score_monedas: userData.highScoreMonedas || 0,
+                  last_active: new Date(userData.lastActive || Date.now()).toISOString(),
+                  updated_at: new Date().toISOString()
+                });
+              } else {
+                // Check if we already have a user in state to avoid overwriting with 0s
+                // if this is a transient "not found" state or if the user was just created
+                setUser(prev => {
+                  if (prev && prev.id === firebaseUser.uid) {
+                    console.warn("User document missing in Firestore, but we have it in state. Not recreating to avoid reset.");
+                    return prev;
                   }
-                })();
+
+                  // Create new user if truly doesn't exist
+                  const newUser: User = {
+                    id: firebaseUser.uid,
+                    displayName: firebaseUser.displayName || 'Player',
+                    email: (firebaseUser.email || '').toLowerCase(),
+                    coins: 0,
+                    monedas: 0,
+                    botKills: 0,
+                    insomniaCount: 0,
+                    highScoreMonedas: 0,
+                    ownedSkins: ['default'],
+                    equippedSkin: 'default',
+                    equippedAbilities: [],
+                    inventoryAbilities: {},
+                    highScore: 0,
+                    lastActive: Date.now()
+                  };
+                  
+                  // Only create if we are not in the middle of a deletion
+                  if (!sessionStorage.getItem('deleting_account')) {
+                    setDoc(userDocRef, newUser, { merge: true })
+                      .catch(e => handleFirestoreError(e, OperationType.CREATE, 'users/' + firebaseUser.uid));
+                      
+                    // Create Supabase profile
+                    (async () => {
+                      try {
+                        await supabase.from('profiles').upsert({
+                          id: firebaseUser.uid,
+                          display_name: newUser.displayName,
+                          email: newUser.email.toLowerCase(),
+                          coins: newUser.coins,
+                          monedas: newUser.monedas,
+                          equipped_skin: newUser.equippedSkin,
+                          high_score: newUser.highScore,
+                          high_score_monedas: newUser.highScoreMonedas,
+                          last_active: new Date(newUser.lastActive).toISOString(),
+                          created_at: new Date().toISOString(),
+                          updated_at: new Date().toISOString()
+                        });
+
+                        // Add initial skin to inventory
+                        await supabase.from('inventory').upsert({
+                          user_id: firebaseUser.uid,
+                          skin_id: 'default',
+                          acquired_at: new Date().toISOString()
+                        });
+                      } catch (err) {
+                        console.error("Error syncing with Supabase on creation:", err);
+                      }
+                    })();
+                  }
+
+                  return newUser;
+                });
               }
+              setLoading(false);
+            } catch (err) {
+              console.error("Error in user data listener:", err);
+              setLoading(false);
+            }
+          }, (e) => {
+            setLoading(false);
+            handleFirestoreError(e, OperationType.GET, 'users/' + firebaseUser.uid);
+          });
 
-              return newUser;
-            });
-          }
+          return () => {
+            unsubUser();
+            clearInterval(presenceInterval);
+          };
+        } else {
+          setUser(null);
           setLoading(false);
-        }, (e) => handleFirestoreError(e, OperationType.GET, 'users/' + firebaseUser.uid));
-
-        return () => {
-          unsubUser();
-          clearInterval(presenceInterval);
-        };
-      } else {
-        setUser(null);
+        }
+      } catch (err) {
+        console.error("Auth state change error:", err);
         setLoading(false);
       }
     });
@@ -243,20 +317,77 @@ export default function App() {
     }
   };
 
+  const handleGuestLogin = () => {
+    const guestId = `guest_${Math.random().toString(36).substring(2, 9)}`;
+    const savedGuest = localStorage.getItem('viborita_guest_data');
+    
+    if (savedGuest) {
+      const parsed = JSON.parse(savedGuest);
+      setUser({ ...parsed, isGuest: true });
+    } else {
+      const newGuest: User = {
+        id: guestId,
+        displayName: `Invitado_${Math.random().toString(36).substring(2, 5)}`,
+        email: 'guest@viborita.io',
+        coins: 1000,
+        monedas: 0,
+        ownedSkins: ['default'],
+        equippedSkin: 'default',
+        equippedAbilities: [],
+        inventoryAbilities: {},
+        inventoryItems: {},
+        highScore: 0,
+        highScoreMonedas: 0,
+        lastActive: Date.now(),
+        isGuest: true,
+        guestId: guestId,
+        usernameSet: true
+      };
+      setUser(newGuest);
+      localStorage.setItem('viborita_guest_data', JSON.stringify(newGuest));
+    }
+    setLoading(false);
+  };
+
   const handleStartGame = (selectedWager: number) => {
     if (!user) return;
     
     // Deduct wager (don't await to make UI transition instant)
-    const userRef = doc(db, 'users', user.id);
-    updateDoc(userRef, {
-      coins: increment(-selectedWager)
-    }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+    if (!user.isGuest) {
+      const userRef = doc(db, 'users', user.id);
+      updateDoc(userRef, {
+        coins: increment(-selectedWager)
+      }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+    } else {
+      const updatedUser = { ...user, coins: user.coins - selectedWager };
+      setUser(updatedUser);
+      localStorage.setItem('viborita_guest_data', JSON.stringify(updatedUser));
+    }
 
     setWager(selectedWager);
     setGameState('playing');
   };
 
+  const handleStartCTF = async (selectedWager: number) => {
+    if (!user) return;
+    if (user.isGuest) return; // CTF disabled for guests
+    
+    const userRef = doc(db, 'users', user.id);
+    await updateDoc(userRef, {
+      monedas: increment(-selectedWager)
+    }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+
+    setWager(selectedWager);
+    setGameState('ctf');
+  };
+
   const handleGameOver = () => {
+    if (user?.isGuest) {
+      const savedGuest = localStorage.getItem('viborita_guest_data');
+      if (savedGuest) {
+        setUser(JSON.parse(savedGuest));
+      }
+    }
     setWager(0);
     setBotCount(1);
     setTrainingWager(0);
@@ -271,14 +402,36 @@ export default function App() {
     setGameState('menu');
   };
 
-  const handleStartTraining = (count: number = 1, wager: number = 0) => {
+  const handleStartTraining = async (count: number = 1, wager: number = 0) => {
+    if (!user) return;
+    
+    if (wager > 0) {
+      if (!user.isGuest) {
+        const userRef = doc(db, 'users', user.id);
+        await updateDoc(userRef, {
+          coins: increment(-wager)
+        }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+
+        // Immediate sync with Supabase to avoid race conditions
+        await supabase.from('profiles').update({
+          coins: user.coins - wager
+        }).eq('id', user.id);
+      } else {
+        const updatedUser = { ...user, coins: user.coins - wager };
+        setUser(updatedUser);
+        localStorage.setItem('viborita_guest_data', JSON.stringify(updatedUser));
+      }
+    }
+
     setBotCount(count);
     setTrainingWager(wager);
+    setTrainingServerId(`training_${user.id}_${Date.now()}`);
     setGameState('training');
   };
 
   const handleStartWager = async (selectedWager: number, selectedGrowthWager: number, category: string) => {
     if (!user) return;
+    if (user.isGuest) return; // Wagers disabled for guests
     
     const userRef = doc(db, 'users', user.id);
     await updateDoc(userRef, {
@@ -330,7 +483,7 @@ export default function App() {
             Descargar APK v{appConfig?.version || 'Latest'}
           </a>
           
-          <p className="mt-8 text-[8px] font-mono text-gray-700 uppercase tracking-[0.4em]">Viborita 1.0.0 - Bonus Arg.</p>
+          <p className="mt-8 text-[8px] font-mono text-gray-700 uppercase tracking-[0.4em]">Viborita 1.1.4 - bonusapp</p>
         </motion.div>
       </div>
     );
@@ -370,13 +523,18 @@ export default function App() {
             />
           </div>
           
-          <motion.p
-            animate={{ opacity: [0.4, 1, 0.4] }}
-            transition={{ duration: 1.5, repeat: Infinity }}
-            className="mt-4 font-mono text-xs uppercase tracking-[0.3em] text-blue-400/60"
-          >
-            Cargando Arena...
-          </motion.p>
+          <div className="mt-6 flex flex-col items-center gap-2">
+            <motion.p
+              animate={{ opacity: [0.4, 1, 0.4] }}
+              transition={{ duration: 1.5, repeat: Infinity }}
+              className="font-mono text-[10px] uppercase tracking-[0.3em] text-blue-400/60"
+            >
+              Verificando integridad...
+            </motion.p>
+            <p className="font-mono text-[8px] text-gray-700 uppercase tracking-widest">
+              v{APP_VERSION}
+            </p>
+          </div>
         </motion.div>
 
         {/* Background Glow */}
@@ -430,15 +588,26 @@ export default function App() {
             </label>
           </div>
           
-          <button
-            onClick={handleLogin}
-            disabled={!termsAccepted}
-            className="group relative flex items-center gap-3 overflow-hidden rounded-full bg-blue-600 px-10 py-5 text-xl font-bold transition-all hover:bg-blue-500 hover:shadow-[0_0_30px_rgba(37,99,235,0.6)] active:scale-95 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:opacity-50 disabled:shadow-none"
-          >
-            <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent transition-transform duration-500 group-hover:translate-x-full" />
-            <LogIn className="h-6 w-6" /> 
-            <span>Iniciar Sesión con Google</span>
-          </button>
+          <div className="flex flex-col gap-4 w-full max-w-sm mx-auto">
+            <button
+              onClick={handleLogin}
+              disabled={!termsAccepted}
+              className="group relative flex items-center justify-center gap-3 overflow-hidden rounded-full bg-blue-600 px-10 py-5 text-xl font-bold transition-all hover:bg-blue-500 hover:shadow-[0_0_30px_rgba(37,99,235,0.6)] active:scale-95 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:opacity-50 disabled:shadow-none"
+            >
+              <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent transition-transform duration-500 group-hover:translate-x-full" />
+              <LogIn className="h-6 w-6" /> 
+              <span>Iniciar Sesión con Google</span>
+            </button>
+
+            <button
+              onClick={handleGuestLogin}
+              disabled={!termsAccepted}
+              className="group relative flex items-center justify-center gap-3 overflow-hidden rounded-full bg-white/5 border border-white/10 px-10 py-5 text-xl font-bold transition-all hover:bg-white/10 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <UserIcon className="h-6 w-6 text-gray-400" />
+              <span className="text-gray-300">Jugar como Invitado</span>
+            </button>
+          </div>
 
           <div className="mt-12 flex gap-8 text-xs font-mono uppercase tracking-widest text-gray-600">
             <span className="flex items-center gap-2"><div className="h-1 w-1 rounded-full bg-blue-500" /> Multiplayer</span>
@@ -557,8 +726,25 @@ export default function App() {
               onStartGame={handleStartGame} 
               onStartTraining={handleStartTraining}
               onStartWager={handleStartWager}
+              onStartCTF={handleStartCTF}
+              onUpdateUser={(updatedUser) => setUser(updatedUser)}
+              onLogout={() => setUser(null)}
               initialRivalId={lastRivalId}
               onRivalHandled={() => setLastRivalId(null)}
+            />
+          </motion.div>
+        ) : gameState === 'ctf' ? (
+          <motion.div
+            key="ctf-arena"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="h-full w-full"
+          >
+            <CaptureTheFlagArena 
+              user={user} 
+              wager={wager} 
+              onGameOver={handleGameOver} 
             />
           </motion.div>
         ) : gameState === 'playing' ? (
@@ -579,7 +765,13 @@ export default function App() {
             exit={{ opacity: 0 }}
             className="h-full w-full"
           >
-            <TrainingArena user={user} botCount={botCount} initialWager={trainingWager} onGameOver={handleGameOver} />
+            <TrainingArena 
+              user={user} 
+              botCount={botCount} 
+              initialWager={trainingWager} 
+              serverId={trainingServerId}
+              onGameOver={handleGameOver} 
+            />
           </motion.div>
         ) : (
           <motion.div

@@ -7,7 +7,7 @@ import { GoldPointIcon } from './Icons';
 import { doc, updateDoc, increment, setDoc, onSnapshot, collection, query, where, deleteDoc, addDoc, getDocs, getDoc, orderBy, limit } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { motion, AnimatePresence } from 'motion/react';
-import { Trophy, ArrowLeft, Zap, Coins, LogOut, Crown, ShieldCheck, X } from 'lucide-react';
+import { Trophy, ArrowLeft, Zap, Coins, LogOut, Crown, X, Lock } from 'lucide-react';
 import { soundManager } from '../lib/sounds';
 import { supabase } from '../lib/supabase';
 
@@ -46,6 +46,14 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
   const [rematchStatus, setRematchStatus] = useState<'none' | 'sending' | 'waiting' | 'accepted' | 'rejected'>('none');
   const [opponentInfo, setOpponentInfo] = useState<{ id: string, name: string } | null>(null);
   const [isBoosting, setIsBoosting] = useState(false);
+  const [boostCharge, setBoostCharge] = useState(5.0); // 5 seconds max
+  const boostChargeRef = useRef(5.0);
+  const [isOverheated, setIsOverheated] = useState(false);
+  const [cooldownTime, setCooldownTime] = useState(0);
+  const cooldownTimeRef = useRef(0);
+  const frameCounterRef = useRef(0);
+  const smokeParticlesRef = useRef<{x: number, y: number, id: number, life: number, vx: number, vy: number}[]>([]);
+  const floatingTextsRef = useRef<{ id: string; x: number; y: number; text: string; color: string; opacity: number }[]>([]);
   const [serverId, setServerId] = useState<string | null>(null);
   const [showCancel, setShowCancel] = useState(false);
   const [topMonedas, setTopMonedas] = useState<string[]>([]); // IDs of top 10 players
@@ -55,17 +63,14 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
   const isTouchBoostingRef = useRef(false);
 
   // Abilities state
-  const [isStopped, setIsStopped] = useState(false);
-  const [isAutopilot, setIsAutopilot] = useState(false);
   const [isInvulnerable, setIsInvulnerable] = useState(false);
   const [lastTeleportTime, setLastTeleportTime] = useState(0);
-  const [floatingTexts, setFloatingTexts] = useState<{ id: string; x: number; y: number; text: string; color: string; opacity: number }[]>([]);
   const equippedAbilities = user.equippedAbilities || [];
   const hasZoom = equippedAbilities.includes('zoom');
   const hasMagnet = equippedAbilities.includes('magnet');
   const hasTeleport = equippedAbilities.includes('teleport');
-  const hasStop = equippedAbilities.includes('stop');
-  const hasAutopilot = equippedAbilities.includes('autopilot');
+  const hasGrosor = equippedAbilities.includes('grosor');
+  const hasBoostCooldown = equippedAbilities.includes('boost_cooldown');
 
   const handleTeleport = async () => {
     if (!hasTeleport || user.coins < 250) return;
@@ -86,15 +91,15 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     setLastTeleportTime(now);
     
     // Add floating text above the button
-    const textId = Math.random().toString(36).substr(2, 9);
-    setFloatingTexts(prev => [...prev, {
+    const textId = `ft-wager-${Math.random().toString(36).substr(2, 9)}-${Date.now()}`;
+    floatingTextsRef.current.push({
       id: textId,
       x: 20,
       y: window.innerHeight - 100,
       text: '-250 Puntos',
       color: '#fbbf24',
       opacity: 1
-    }]);
+    });
 
     soundManager.play('star'); // Flash sound
     
@@ -119,8 +124,8 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
   // Calculate initial segments based on wager level (1-4)
   const getInitialSegmentsLength = () => {
     const bets = {
-      basica: [50, 100, 150, 200],
-      pro: [500, 1000, 2000, 3000],
+      basica: [250, 500, 750, 1000],
+      pro: [1000, 2000, 3000, 4000],
       millonario: [5000, 7500, 10000, 15000]
     };
     const categoryBets = bets[category as keyof typeof bets] || bets.basica;
@@ -144,8 +149,10 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     color1: ALL_SKINS.find(s => s.id === user.equippedSkin)?.colors[0] || '#22ff44',
     color2: ALL_SKINS.find(s => s.id === user.equippedSkin)?.colors[1] || '#11cc33',
     skinEmoji: ALL_SKINS.find(s => s.id === user.equippedSkin)?.icon,
+    tailEmoji: ALL_SKINS.find(s => s.id === user.equippedSkin)?.tailIcon,
     hasAura: ALL_SKINS.find(s => s.id === user.equippedSkin)?.hasAura,
     auraType: ALL_SKINS.find(s => s.id === user.equippedSkin)?.auraType,
+    skinId: user.equippedSkin,
     isBoosting: false,
   });
 
@@ -189,72 +196,82 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
 
   useEffect(() => {
     const initServer = async () => {
-      // Pass category to findAvailableServer to ensure isolation
-      const id = await findAvailableServer('wagerPlayers', category);
-      setServerId(id);
-      playerRef.current.serverId = id;
+      try {
+        // Pass category to findAvailableServer to ensure isolation
+        const id = await findAvailableServer('wagerPlayers', category);
+        if (!id) throw new Error("No server ID returned");
+        setServerId(id);
+        playerRef.current.serverId = id;
 
-      // Initialize Socket.io
-      const SERVER_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
-        ? window.location.origin 
-        : 'https://ais-pre-q3rghkaneiw6ol5cicebm3-79875930852.us-east1.run.app';
-        
-      const socket = io(SERVER_URL);
-      socketRef.current = socket;
+        // Initialize Socket.io
+        const SERVER_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
+          ? window.location.origin 
+          : 'https://ais-pre-q3rghkaneiw6ol5cicebm3-79875930852.us-east1.run.app';
+          
+        const socket = io(SERVER_URL);
+        socketRef.current = socket;
 
-      socket.on("connect", () => {
-        console.log(`Connected to WebSocket server (Wager - ${category})`);
-        // The serverId is already prefixed by findAvailableServer
-        socket.emit("join_arena", {
-          id: user.id,
-          displayName: user.displayName,
-          equippedSkin: user.equippedSkin,
-          hasAura: playerRef.current.hasAura,
-          auraType: playerRef.current.auraType,
-          serverId: id,
-          wager: playerRef.current.wager,
-          category: category,
-          mode: 'wager'
+        socket.on("connect", () => {
+          console.log(`Connected to WebSocket server (Wager - ${category})`);
+          // The serverId is already prefixed by findAvailableServer
+          socket.emit("join_arena", {
+            id: user.id,
+            displayName: user.displayName,
+            equippedSkin: user.equippedSkin,
+            hasAura: playerRef.current.hasAura,
+            auraType: playerRef.current.auraType,
+            serverId: id,
+            wager: playerRef.current.wager,
+            category: category,
+            mode: 'wager'
+          });
         });
-      });
 
-      socket.on("player_moved", (data) => {
-        if (data.id !== user.id) {
-          otherPlayersRef.current[data.id] = {
-            ...data,
-            lastUpdate: Date.now()
-          };
-        }
-      });
-
-      socket.on("server_death", ({ killerName }) => {
-        console.log("Server confirmed death (Wager)!");
-        const killerId = Object.keys(otherPlayersRef.current).find(id => otherPlayersRef.current[id].displayName === killerName);
-        handleDeath(killerId);
-      });
-
-      socket.on("player_died", async ({ id, wager: victimWager, segments: victimSegments, killerName }) => {
-        if (id !== user.id) {
-          // If in private room, the remaining player is ALWAYS the winner if the other dies
-          if (category.startsWith('private_')) {
-             // Identify opponent if not already done
-             if (!opponentInfo) {
-               setOpponentInfo({ id, name: otherPlayersRef.current[id]?.displayName || killerName || 'Oponente' });
-             }
-             
-             // handleWin will set setIsWinner(true) and setIsAlive(false) correctly
-             handleWin(victimWager || wager, id);
-          } else {
-            // In public rooms, only if I am the killer or specifically informed
-            if (killerName === user.displayName && victimWager && victimSegments) {
-              dropWagerCoins(victimWager, victimSegments);
-              updateCompetitionStats(true, victimWager, id);
-            }
+        socket.on("player_moved", (data) => {
+          if (data.id !== user.id) {
+            otherPlayersRef.current[data.id] = {
+              ...data,
+              lastUpdate: Date.now()
+            };
           }
-          delete otherPlayersRef.current[id];
-          delete interpolatedPlayersRef.current[id];
-        }
-      });
+        });
+
+        socket.on("server_death", ({ killerName }) => {
+          console.log("Server confirmed death (Wager)!");
+          const killerId = Object.keys(otherPlayersRef.current).find(id => otherPlayersRef.current[id].displayName === killerName);
+          handleDeath(killerId);
+        });
+
+        socket.on("player_died", async ({ id, wager: victimWager, segments: victimSegments, killerName }) => {
+          if (id !== user.id) {
+            // If in private room, the remaining player is ALWAYS the winner if the other dies
+            if (category.startsWith('private_')) {
+               // Identify opponent if not already done
+               if (!opponentInfo) {
+                 setOpponentInfo({ id, name: otherPlayersRef.current[id]?.displayName || killerName || 'Oponente' });
+               }
+               
+               // handleWin will set setIsWinner(true) and setIsAlive(false) correctly
+               handleWin(victimWager || wager, id);
+            } else {
+              // In public rooms, only if specifically informed
+              if (killerName === user.displayName && victimWager && victimSegments) {
+                // We DON'T call dropWagerCoins here anymore because the VICTIM calls it in their handleDeath
+                // This prevents double dropping of coins.
+                updateCompetitionStats(true, victimWager, id);
+              }
+            }
+            delete otherPlayersRef.current[id];
+            delete interpolatedPlayersRef.current[id];
+          }
+        });
+      } catch (err) {
+        console.error("Error initializing server in WagerArena:", err);
+        const fallbackId = category ? `${category}_1` : "wager_1";
+        setServerId(fallbackId);
+        playerRef.current.serverId = fallbackId;
+        setShowCancel(true);
+      }
     };
     initServer();
 
@@ -304,8 +321,9 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       });
       itemsRef.current = newItems;
 
-      // Arena items spawning logic: Keep at least 6 items in wager arenas
-      if (snapshot.size < 6) {
+      // Arena items spawning logic: Only for private rooms or specific categories
+      // User requested to remove random coins/items in global competition
+      if (snapshot.size < 6 && isPrivate) {
         const spawnCount = 6 - snapshot.size;
         for (let i = 0; i < spawnCount; i++) {
           const rand = Math.random();
@@ -500,47 +518,54 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       playerRef.current.angle += diff * Math.min(1, 8 * dt);
     }
 
-    const speed = isStopped ? 0 : (isBoosting ? BASE_SPEED * 2 : BASE_SPEED);
-    playerRef.current.isBoosting = isBoosting && !isStopped;
-    
-    // Autopilot logic
-    if (isAutopilot && !isStopped) {
-      let nearestFood: {x: number, y: number} | null = null;
-      let minDist = 300;
-      droppedCoinsRef.current.forEach(f => {
-        const d = Math.sqrt((head.x - f.x) ** 2 + (head.y - f.y) ** 2);
-        if (d < minDist) {
-          minDist = d;
-          nearestFood = f;
-        }
-      });
-      if (nearestFood) {
-        const dxT = nearestFood.x - head.x;
-        const dyT = nearestFood.y - head.y;
-        const targetAngle = Math.atan2(dyT, dxT);
-        let diff = targetAngle - playerRef.current.angle;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        playerRef.current.angle += diff * Math.min(1, 5 * dt);
+    // Boost logic changes
+    let actualIsBoosting = isBoosting && !isOverheated;
+    if (actualIsBoosting) {
+      boostChargeRef.current = Math.max(0, boostChargeRef.current - dt);
+      if (boostChargeRef.current === 0 && !isOverheated) {
+        setIsOverheated(true);
+        cooldownTimeRef.current = 30;
       }
-      // Wall avoidance
-      const lookAhead = 100;
-      const futureX = head.x + Math.cos(playerRef.current.angle) * lookAhead;
-      const futureY = head.y + Math.sin(playerRef.current.angle) * lookAhead;
-      if (futureX < 50 || futureX > worldW - 50 || futureY < 50 || futureY > worldH - 50) {
-        playerRef.current.angle += Math.PI * 0.1;
+    } else if (isOverheated) {
+      cooldownTimeRef.current = Math.max(0, cooldownTimeRef.current - dt);
+      if (cooldownTimeRef.current === 0) setIsOverheated(false);
+      boostChargeRef.current = Math.min(5, boostChargeRef.current + (5 / 30) * dt);
+
+      if (Math.random() > 0.7) {
+        smokeParticlesRef.current.push({
+          x: head.x,
+          y: head.y,
+          id: Math.random(),
+          life: 1.0,
+          vx: (Math.random() - 0.5) * 50,
+          vy: (Math.random() - 0.5) * 50 - 30
+        });
       }
+    } else if (boostChargeRef.current < 5) {
+      boostChargeRef.current = Math.min(5, boostChargeRef.current + 0.5 * dt);
     }
 
-    if (isBoosting && !isStopped) {
-      // Consume score and wager for boost (deflationary mechanic)
-      const cost = 0.2 * dt * 60;
-      setScore(s => Math.max(0, s - cost));
-      playerRef.current.wager = Math.max(0, playerRef.current.wager - cost);
+    // Throttle state updates for UI performance
+    frameCounterRef.current++;
+    if (frameCounterRef.current % 3 === 0) {
+      setBoostCharge(boostChargeRef.current);
+      setCooldownTime(cooldownTimeRef.current);
     }
+
+    smokeParticlesRef.current = smokeParticlesRef.current.map(p => ({
+      ...p,
+      x: p.x + p.vx * dt,
+      y: p.y + p.vy * dt,
+      life: p.life - dt * 0.8
+    })).filter(p => p.life > 0);
+
+    playerRef.current.isBoosting = actualIsBoosting;
+    const speed = actualIsBoosting ? BASE_SPEED * 2 : BASE_SPEED;
+    
     const newX = head.x + Math.cos(playerRef.current.angle) * speed * dt;
     const newY = head.y + Math.sin(playerRef.current.angle) * speed * dt;
 
+    // Wall collision
     if (newX < 0 || newX > worldW || newY < 0 || newY > worldH) {
       if (!isInvulnerable) {
         handleDeath();
@@ -553,18 +578,11 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       trail.unshift({ x: newX, y: newY });
     }
 
-    // Growth logic: starting size (base segments from wager) + scaling segments
+    // Uniform growth logic: 1 segment per 10 coins constantly
     const collectedCoins = Math.max(0, playerRef.current.wager - initialWagerRef.current);
     const pointsPerSegment = 5;
     const baseSegments = initialSegCount;
-    
-    let bonusSegments = 0;
-    if (collectedCoins <= 3000) {
-      bonusSegments = Math.floor(collectedCoins / 10);
-    } else {
-      // 300 segments from first 3000 coins (3000/10) + 1 segment every 50 coins after that
-      bonusSegments = 300 + Math.floor((collectedCoins - 3000) / 50);
-    }
+    const bonusSegments = Math.floor(collectedCoins / 10);
     
     const targetSegments = baseSegments + bonusSegments;
     const maxTrailLen = targetSegments * pointsPerSegment;
@@ -584,12 +602,12 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     if (hasZoom) targetZoomBase *= 0.65;
     cameraRef.current.zoom += (targetZoomBase - cameraRef.current.zoom) * 0.02;
 
-    // Update floating texts
-    setFloatingTexts(prev => prev.map(ft => ({
+    // Update floating texts (Ref logic, no state update here)
+    floatingTextsRef.current = floatingTextsRef.current.map(ft => ({
       ...ft,
       y: ft.y - 1,
       opacity: ft.opacity - 0.02
-    })).filter(ft => ft.opacity > 0));
+    })).filter(ft => ft.opacity > 0);
   };
 
   const checkCollisions = (dt: number) => {
@@ -606,7 +624,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       const d = Math.sqrt(dx * dx + dy * dy);
       
       const attractionRadius = hasMagnet ? CELL * 3 : 0;
-      const collectionRadius = CELL;
+      const collectionRadius = hasGrosor ? CELL * 2 : CELL;
 
       // Magnet attraction effect
       if (hasMagnet && d < attractionRadius && d > collectionRadius) {
@@ -662,10 +680,12 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       const isOtherInvulnerable = other.spawnTime && (Date.now() - other.spawnTime < 1500);
       if (isOtherInvulnerable) return;
 
+      const hitBox = hasGrosor ? CELL * 2 : CELL;
+
       // Case 1: My Head vs Their Body (I die)
       other.segments.forEach(seg => {
         const d = Math.sqrt((head.x - seg.x) ** 2 + (head.y - seg.y) ** 2);
-        if (d < CELL) {
+        if (d < hitBox) {
           handleDeath();
         }
       });
@@ -675,7 +695,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       if (otherHead) {
         playerRef.current.segments.forEach(seg => {
           const d = Math.sqrt((otherHead.x - seg.x) ** 2 + (seg.y - otherHead.y) ** 2);
-          if (d < CELL) {
+          if (d < hitBox) {
             // Tell server they died by hitting me
             if (socketRef.current?.connected) {
               socketRef.current.emit("player_died", {
@@ -686,11 +706,9 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
               });
             }
 
-            // Drop coins locally for immediate effect
-            if (!category.startsWith('private_')) {
-              dropWagerCoins(other.wager, other.segments);
-            }
-
+            // We DON'T call dropWagerCoins here because the victim will detect it and call it locally
+            // This prevents double dropping.
+            
             // Update local stats
             updateCompetitionStats(true, other.wager, other.id);
 
@@ -952,28 +970,29 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     const totalValue = Math.max(0, Math.floor(wagerVal || 0));
     const expiresAt = Date.now() + 33 * 60 * 1000;
 
-    // Use a fixed count of orbs to define the silhouette clearly but efficiently
-    // We target ~1 orb every few units of length to keep it recognizable
-    const dropCount = Math.max(12, Math.min(50, Math.floor(segments.length / 3)));
+    // Distribution logic optimized for silhouette
+    // We use a fixed number of orbs to represent the player's body clearly
+    // but only enough to cover the silhouette as requested
+    // Request: each orb can value any value, as long as total matches wager + collected
+    const dropCount = Math.min(segments.length, 30); // 30 orbs is enough for silhouette
     
-    if (dropCount <= 0 || segments.length === 0) return;
+    if (dropCount <= 0) return;
 
-    // Distribution logic: divide totalValue by dropCount
-    const baseValuePerDrop = Math.floor(totalValue / dropCount);
-    const remainder = totalValue % dropCount;
+    // Distribution: divide exactly the provided wager value by dropCount
+    const totalToDrop = Math.max(0, Math.floor(wagerVal || 0));
+    const baseValuePerDrop = Math.floor(totalToDrop / dropCount);
+    const remainder = totalToDrop % dropCount;
 
     for (let i = 0; i < dropCount; i++) {
-      // Scale index to cover the ENTIRE length of segments from head to tail
-      const segIndex = Math.floor((i / (dropCount - 1 || 1)) * (segments.length * 0.9)); // Focus on main body
+      // Pick segments uniformly to form silhouette
+      const segIndex = Math.floor((i / (dropCount > 1 ? dropCount - 1 : 1)) * (segments.length - 1));
       const seg = segments[segIndex];
       if (!seg) continue;
 
-      // Assign the value: base + 1 if we have remainder left
       const val = baseValuePerDrop + (i < remainder ? 1 : 0);
       
-      // Even if val is 0, we drop it to maintain the visual silhouette
-      const scatterX = (Math.random() - 0.5) * 8;
-      const scatterY = (Math.random() - 0.5) * 8;
+      const scatterX = (Math.random() - 0.5) * 6;
+      const scatterY = (Math.random() - 0.5) * 6;
 
       addDoc(collection(db, 'wagerCoins'), {
         x: seg.x + scatterX,
@@ -983,7 +1002,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
         category,
         expiresAt,
         type: 'dropped',
-        color: '#00f2ff', // Specific Neon Blue for death loot
+        color: '#00ccff', // Specialized silhouette color
         isDeathLoot: true
       }).catch(e => handleFirestoreError(e, OperationType.CREATE, 'wagerCoins'));
     }
@@ -1168,6 +1187,18 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     if (isAlive) {
       renderMinimap(ctx);
     }
+
+    // Draw Floating Texts
+    ctx.restore(); // Out of camera space if they are UI-based
+    floatingTextsRef.current.forEach(ft => {
+      ctx.save();
+      ctx.globalAlpha = ft.opacity;
+      ctx.fillStyle = ft.color;
+      ctx.font = 'black 12px Arial';
+      ctx.textAlign = 'left';
+      ctx.fillText(ft.text, ft.x, ft.y);
+      ctx.restore();
+    });
   };
 
   const renderMinimap = (ctx: CanvasRenderingContext2D) => {
@@ -1278,6 +1309,26 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
         gradient.addColorStop(0, 'rgba(255, 255, 0, 0.5)');
         gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.3)');
         gradient.addColorStop(1, 'rgba(255, 255, 200, 0)');
+      } else if (snake.auraType === 'water') {
+        gradient.addColorStop(0, 'rgba(59, 130, 246, 0.6)');
+        gradient.addColorStop(0.5, 'rgba(30, 64, 175, 0.4)');
+        gradient.addColorStop(1, 'rgba(30, 58, 138, 0)');
+      } else if (snake.auraType === 'death') {
+        gradient.addColorStop(0, 'rgba(75, 85, 99, 0.5)');
+        gradient.addColorStop(0.5, 'rgba(6, 78, 59, 0.3)');
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      } else if (snake.auraType === 'crystal') {
+        gradient.addColorStop(0, 'rgba(34, 211, 238, 0.5)');
+        gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.3)');
+        gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      } else if (snake.auraType === 'ember') {
+        gradient.addColorStop(0, 'rgba(239, 68, 68, 0.6)');
+        gradient.addColorStop(0.5, 'rgba(0, 0, 0, 0.4)');
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      } else if (snake.auraType === 'nebula') {
+        gradient.addColorStop(0, 'rgba(236, 72, 153, 0.5)');
+        gradient.addColorStop(0.5, 'rgba(126, 34, 206, 0.3)');
+        gradient.addColorStop(1, 'rgba(88, 28, 135, 0)');
       }
       
       ctx.fillStyle = gradient;
@@ -1307,18 +1358,49 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
           }
         }
       } else if (Math.random() > 0.6) {
+        let rSize = Math.random() * 3 + 1;
         if (snake.auraType === 'fire') {
           ctx.fillStyle = `rgba(255, ${Math.floor(Math.random() * 100 + 50)}, 0, 0.5)`;
         } else if (snake.auraType === 'ice') {
           ctx.fillStyle = `rgba(${Math.floor(Math.random() * 50 + 200)}, 255, 255, 0.5)`;
+        } else if (snake.auraType === 'water') {
+          ctx.fillStyle = `rgba(147, 197, 253, 0.6)`;
+        } else if (snake.auraType === 'death') {
+          ctx.fillStyle = `rgba(75, 85, 99, ${Math.random() * 0.5})`;
+        } else if (snake.auraType === 'crystal') {
+          ctx.fillStyle = `rgba(255, 255, 255, ${Math.random() * 0.8})`;
+          rSize = Math.random() * 3 + 1;
+        } else if (snake.auraType === 'ember') {
+          ctx.fillStyle = Math.random() > 0.5 ? '#ef4444' : '#f97316';
+          rSize = Math.random() * 2 + 1;
+        } else if (snake.auraType === 'nebula') {
+          if (['dragon', 'dragon_fuego'].includes(snake.skinId || '')) return; // Quitar partículas para el skin de dragón
+          ctx.fillStyle = Math.random() > 0.5 ? '#ec4899' : '#a855f7';
         }
         ctx.beginPath();
         const px = trail[0].x + (Math.random() - 0.5) * headRadius * 2;
         const py = trail[0].y + (Math.random() - 0.5) * headRadius * 2;
-        ctx.arc(px, py, Math.random() * 3 + 1, 0, Math.PI * 2);
+        ctx.arc(px, py, rSize, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.restore();
+    }
+
+    const isOverheated = snake.userId === user.id && cooldownTime > 0;
+    const bodyRadius = (hasGrosor && snake.userId === user.id) ? baseRadius * 2 : baseRadius;
+    const hRadius = (hasGrosor && snake.userId === user.id) ? headRadius * 2 : headRadius;
+
+    // Draw smoke for overheating
+    if (isOverheated) {
+      smokeParticlesRef.current.forEach(p => {
+        ctx.save();
+        ctx.globalAlpha = p.life * 0.4;
+        ctx.fillStyle = '#888';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5 + (1 - p.life) * 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      });
     }
 
     // Neon glow for the whole snake
@@ -1328,49 +1410,505 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     for (let i = trail.length - 1; i >= pointsPerSegment; i -= pointsPerSegment) {
       const idx = Math.floor(i);
       const segmentIndex = Math.floor(idx / pointsPerSegment);
+      const isTail = i >= (trail.length - pointsPerSegment);
+      const r = bodyRadius;
       
-      // Constant thickness (no tapering)
-      const r = baseRadius;
-      
+      const isSpecialSkin = ['necromancer', 'dragon_fuego'].includes(snake.skinId || '');
+
       if (snake.isBoosting) {
         ctx.fillStyle = Math.random() > 0.5 ? '#fff' : (segmentIndex % 2 === 0 ? snake.color1 : snake.color2);
-        // Aura particles
-        if (Math.random() > 0.8) {
-          ctx.save();
-          ctx.shadowBlur = 5;
-          ctx.fillStyle = '#fff';
-          ctx.beginPath();
-          ctx.arc(trail[idx].x + (Math.random() - 0.5) * r * 3, trail[idx].y + (Math.random() - 0.5) * r * 3, 2, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
-        }
       } else {
         ctx.fillStyle = segmentIndex % 2 === 0 ? snake.color1 : snake.color2;
       }
 
       ctx.beginPath();
-      ctx.arc(trail[idx].x, trail[idx].y, r, 0, Math.PI * 2);
-      ctx.fill();
+      if (snake.skinId === 'dragon_fuego') {
+        const rTapered = bodyRadius * (1 - (idx / trail.length) * 0.4); 
+        ctx.save();
+        ctx.translate(trail[idx].x, trail[idx].y);
+        const nextSeg = trail[idx - pointsPerSegment] || trail[idx];
+        const angle = Math.atan2(nextSeg.y - trail[idx].y, nextSeg.x - trail[idx].x);
+        ctx.rotate(angle);
+
+        const radius = rTapered;
+        
+        // --- Vector Style Segment ---
+        ctx.lineWidth = radius * 0.2;
+        ctx.strokeStyle = "#000000";
+        ctx.lineJoin = "round";
+
+        // Púas laterales (Hueso)
+        ctx.fillStyle = "#F2D8B3";
+        ctx.beginPath();
+        ctx.moveTo(0, -radius*0.7);
+        ctx.lineTo(-radius*0.8, -radius*1.6);
+        ctx.lineTo(radius*0.4, -radius*0.7);
+        ctx.moveTo(0, radius*0.7);
+        ctx.lineTo(-radius*0.8, radius*1.6);
+        ctx.lineTo(radius*0.4, radius*0.7);
+        ctx.fill(); 
+        ctx.stroke();
+
+        // Círculo principal del cuerpo
+        ctx.fillStyle = "#796B75";
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.fill(); 
+        ctx.stroke();
+
+        // Detalle central oscuro del cuerpo
+        ctx.fillStyle = "#5C4E57";
+        ctx.beginPath();
+        ctx.moveTo(-radius*0.4, -radius*0.5);
+        ctx.lineTo(radius*0.4, 0);
+        ctx.lineTo(-radius*0.4, radius*0.5);
+        ctx.lineTo(-radius*0.6, 0);
+        ctx.closePath();
+        ctx.fill(); 
+        ctx.stroke();
+
+        ctx.restore();
+      } else if (snake.skinId === 'komodo') {
+        const rTapered = bodyRadius * (1 - (idx / trail.length) * 0.2); 
+        ctx.save();
+        ctx.translate(trail[idx].x, trail[idx].y);
+        const nextSeg = trail[idx - pointsPerSegment] || trail[idx];
+        const angle = Math.atan2(nextSeg.y - trail[idx].y, nextSeg.x - trail[idx].x);
+        ctx.rotate(angle);
+        
+        const radius = rTapered;
+
+        const bodyGrad = ctx.createLinearGradient(0, -radius, 0, radius);
+        bodyGrad.addColorStop(0, '#1c1714');
+        bodyGrad.addColorStop(0.2, '#3b322a');
+        bodyGrad.addColorStop(0.5, '#6b5e52');
+        bodyGrad.addColorStop(0.8, '#3b322a');
+        bodyGrad.addColorStop(1, '#0d0b09');
+
+        ctx.fillStyle = bodyGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        const drawDorsalScale = (x: number, y: number, r: number, color: string, highlight: string) => {
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+          ctx.beginPath();
+          ctx.moveTo(r * 0.2, 0);
+          ctx.quadraticCurveTo(-r * 0.5, r * 0.8, -r * 0.8, 0);
+          ctx.quadraticCurveTo(-r * 0.5, -r * 0.8, r * 0.2, 0);
+          ctx.fill();
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(r * 0.3, 0);
+          ctx.quadraticCurveTo(-r * 0.3, r * 0.6, -r * 0.6, 0);
+          ctx.quadraticCurveTo(-r * 0.3, -r * 0.6, r * 0.3, 0);
+          ctx.fill();
+          ctx.strokeStyle = highlight;
+          ctx.lineWidth = r * 0.12;
+          ctx.lineCap = "round";
+          ctx.beginPath();
+          ctx.moveTo(-r * 0.1, -r * 0.25);
+          ctx.quadraticCurveTo(-r * 0.25, 0, -r * 0.1, r * 0.25);
+          ctx.stroke();
+          ctx.restore();
+        };
+
+        drawDorsalScale(0, 0, radius, '#29221d', 'rgba(255, 255, 255, 0.15)');
+        drawDorsalScale(-radius*0.15, -radius*0.4, radius*0.6, '#473d34', 'rgba(255, 255, 255, 0.1)');
+        drawDorsalScale(-radius*0.15, radius*0.4, radius*0.6, '#473d34', 'rgba(255, 255, 255, 0.1)');
+        
+        ctx.restore();
+      } else if (snake.skinId === 'necromancer') {
+        // Rib cage look (Bone tail removed as requested)
+        ctx.save();
+        ctx.translate(trail[idx].x, trail[idx].y);
+        const nextSeg = trail[idx - pointsPerSegment] || trail[idx];
+        const angle = Math.atan2(nextSeg.y - trail[idx].y, nextSeg.x - trail[idx].x);
+        ctx.rotate(angle);
+        
+        // Spine
+        ctx.fillStyle = '#e5e7eb';
+        ctx.fillRect(-r/2, -r/4, r, r/2);
+        
+        // Ribs
+        ctx.strokeStyle = '#e5e7eb';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        // Top rib
+        ctx.moveTo(0, -r/4);
+        ctx.quadraticCurveTo(r, -r, 0, -r * 1.2);
+        // Bottom rib
+        ctx.moveTo(0, r/4);
+        ctx.quadraticCurveTo(r, r, 0, r * 1.2);
+        ctx.stroke();
+        ctx.restore();
+      } else if (isSpecialSkin) {
+        const sides = 6;
+        const angleStep = (Math.PI * 2) / sides;
+        ctx.moveTo(trail[idx].x + r * Math.cos(0), trail[idx].y + r * Math.sin(0));
+        for (let s = 1; s <= sides; s++) {
+          ctx.lineTo(trail[idx].x + r * Math.cos(s * angleStep), trail[idx].y + r * Math.sin(s * angleStep));
+        }
+        ctx.closePath();
+        ctx.fill();
+      } else {
+        ctx.arc(trail[idx].x, trail[idx].y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      if (isSpecialSkin) {
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      if (isTail && snake.tailEmoji) {
+        ctx.save();
+        // Point tail away from the next segment
+        const nextSegment = trail[idx - pointsPerSegment] || trail[idx];
+        const dx = trail[idx].x - nextSegment.x;
+        const dy = trail[idx].y - nextSegment.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        
+        // Si es phoenix, lo movemos un poco más atrás para que "flote" fuera del orbe
+        const offset = snake.skinId === 'phoenix' ? r * 1.2 : 0;
+        ctx.translate(trail[idx].x + (dx/dist) * offset, trail[idx].y + (dy/dist) * offset);
+
+        const tailAngle = Math.atan2(dy, dx) + Math.PI / 2;
+        ctx.rotate(tailAngle);
+        
+        // Fenix Eterno tail emoji should be a bit smaller (r * 1.8 instead of r * 2.5)
+        const emojiSizeMultiplier = snake.skinId === 'phoenix' ? 1.8 : 2.5;
+        const fontSize = Math.max(12, r * emojiSizeMultiplier);
+        ctx.font = `${fontSize}px Arial`;
+        
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(snake.tailEmoji, 0, 0);
+        ctx.restore();
+      }
+
+      if (snake.isBoosting && Math.random() > 0.8) {
+        ctx.save();
+        ctx.shadowBlur = 5;
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(trail[idx].x + (Math.random() - 0.5) * r * 3, trail[idx].y + (Math.random() - 0.5) * r * 3, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      if (snake.hasAura && Math.random() > 0.7) {
+        ctx.save();
+        let rSize = 2;
+        if (snake.auraType === 'fire') {
+          ctx.fillStyle = `rgba(255, ${Math.floor(Math.random() * 100 + 50)}, 0, 0.5)`;
+        } else if (snake.auraType === 'ice') {
+          ctx.fillStyle = `rgba(${Math.floor(Math.random() * 50 + 200)}, 255, 255, 0.5)`;
+        } else if (snake.auraType === 'water') {
+          ctx.fillStyle = `rgba(147, 197, 253, 0.6)`;
+        } else if (snake.auraType === 'death') {
+          ctx.fillStyle = `rgba(75, 85, 99, 0.4)`;
+        } else if (snake.auraType === 'crystal') {
+          ctx.fillStyle = `rgba(255, 255, 255, 0.6)`;
+          rSize = Math.random() * 2 + 1;
+        } else if (snake.auraType === 'ember') {
+          ctx.fillStyle = '#ef4444';
+        } else if (snake.auraType === 'nebula') {
+          ctx.fillStyle = '#ec4899';
+        }
+        ctx.beginPath();
+        ctx.arc(trail[idx].x + (Math.random() - 0.5) * r * 3, trail[idx].y + (Math.random() - 0.5) * r * 3, rSize, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
     }
     const head = trail[0];
-    ctx.fillStyle = snake.isBoosting ? '#fff' : snake.color1;
-    ctx.beginPath(); ctx.arc(head.x, head.y, headRadius, 0, Math.PI * 2); ctx.fill();
+
+    if (snake.skinId === 'dragon_fuego') {
+      ctx.save();
+      ctx.translate(head.x, head.y);
+      ctx.rotate(snake.angle);
+
+      const radius = hRadius;
+      const s = radius * 2.2;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+
+      // --- 1. CUERNOS DE HUESO ---
+      const drawHorns = (side: number) => {
+          ctx.save(); 
+          ctx.scale(1, side);
+          ctx.fillStyle = "#F2D8B3";
+          ctx.strokeStyle = "#000000";
+          ctx.lineWidth = s * 0.1;
+
+          // Cuerno Superior Grande (Achicado)
+          ctx.beginPath();
+          ctx.moveTo(-s*0.1, -s*0.3);
+          ctx.quadraticCurveTo(-s*0.3, -s*0.6, -s*0.35, -s*0.9);
+          ctx.quadraticCurveTo(0, -s*0.6, s*0.1, -s*0.4);
+          ctx.fill(); ctx.stroke();
+
+          // Cuerno Medio (Achicado)
+          ctx.beginPath();
+          ctx.moveTo(s*0.1, -s*0.4);
+          ctx.quadraticCurveTo(s*0.05, -s*0.55, 0, -s*0.7);
+          ctx.quadraticCurveTo(s*0.25, -s*0.55, s*0.25, -s*0.4);
+          ctx.fill(); ctx.stroke();
+
+          // Cuerno Pequeño Frontal (Achicado)
+          ctx.beginPath();
+          ctx.moveTo(s*0.3, -s*0.4);
+          ctx.quadraticCurveTo(s*0.25, -s*0.5, s*0.2, -s*0.55);
+          ctx.quadraticCurveTo(s*0.35, -s*0.5, s*0.4, -s*0.4);
+          ctx.fill(); ctx.stroke();
+          ctx.restore();
+      };
+      drawHorns(1); 
+      drawHorns(-1);
+
+      // --- 2. BASE DE LA CABEZA ---
+      ctx.fillStyle = "#796B75"; 
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = s * 0.12; 
+
+      const headShape = new Path2D();
+      headShape.moveTo(-s*0.4, 0);
+      headShape.lineTo(-s*0.5, -s*0.1);
+      headShape.lineTo(-s*0.4, -s*0.2);
+      headShape.lineTo(-s*0.5, -s*0.3);
+      headShape.lineTo(-s*0.3, -s*0.4);
+      headShape.quadraticCurveTo(s*0.1, -s*0.6, s*0.45, -s*0.4);
+      headShape.lineTo(s*0.5, -s*0.2);
+      headShape.lineTo(s*0.8, -s*0.2);
+      headShape.quadraticCurveTo(s*1.1, -s*0.1, s*1.1, 0);
+      headShape.quadraticCurveTo(s*1.1, s*0.1, s*0.8, s*0.2);
+      headShape.lineTo(s*0.5, s*0.2);
+      headShape.lineTo(s*0.45, s*0.4);
+      headShape.quadraticCurveTo(s*0.1, s*0.6, -s*0.3, s*0.4);
+      headShape.lineTo(-s*0.5, s*0.3);
+      headShape.lineTo(-s*0.4, s*0.2);
+      headShape.lineTo(-s*0.5, s*0.1);
+      headShape.closePath();
+
+      ctx.stroke(headShape);
+      ctx.fill(headShape);
+
+      // --- 3. PATRONES OSCUROS ---
+      ctx.fillStyle = "#5C4E57"; 
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = s * 0.08;
+
+      const drawBrow = (side: number) => {
+          ctx.save(); 
+          ctx.scale(1, side);
+          ctx.beginPath();
+          ctx.moveTo(-s*0.2, 0);
+          ctx.lineTo(-s*0.2, -s*0.2);
+          ctx.lineTo(-s*0.3, -s*0.3);
+          ctx.quadraticCurveTo(s*0.1, -s*0.5, s*0.4, -s*0.35);
+          ctx.quadraticCurveTo(s*0.3, -s*0.1, s*0.2, -s*0.15);
+          ctx.quadraticCurveTo(s*0.1, -s*0.3, -s*0.1, -s*0.15);
+          ctx.lineTo(0, 0);
+          ctx.fill(); 
+          ctx.stroke();
+          ctx.restore();
+      };
+      drawBrow(1); 
+      drawBrow(-1);
+
+      // --- 4. LÍNEAS DEL HOCICO ---
+      ctx.beginPath();
+      ctx.moveTo(s*0.2, -s*0.15);
+      ctx.lineTo(s*0.8, -s*0.15);
+      ctx.moveTo(s*0.2, s*0.15);
+      ctx.lineTo(s*0.8, s*0.15);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(s*0.8, -s*0.15);
+      ctx.quadraticCurveTo(s*0.7, 0, s*0.8, s*0.15);
+      ctx.stroke();
+
+      // --- 5. OJOS ---
+      const drawEye = (side: number) => {
+          ctx.save(); 
+          ctx.scale(1, side);
+          ctx.fillStyle = "#F8B81D";
+          ctx.beginPath();
+          ctx.moveTo(s*0.4, -s*0.25);
+          ctx.lineTo(s*0.2, -s*0.1);
+          ctx.lineTo(s*0.35, -s*0.12);
+          ctx.closePath();
+          ctx.fill();
+          
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = "#F8B81D";
+          ctx.fill();
+          ctx.restore();
+      };
+      drawEye(1); 
+      drawEye(-1);
+
+      // --- 6. FOSAS NASALES ---
+      const drawNostril = (side: number) => {
+          ctx.save(); 
+          ctx.scale(1, side);
+          ctx.fillStyle = "#000000";
+          ctx.beginPath();
+          ctx.moveTo(s*0.85, -s*0.08);
+          ctx.quadraticCurveTo(s*1.0, -s*0.15, s*0.95, -s*0.02);
+          ctx.quadraticCurveTo(s*0.9, -s*0.02, s*0.85, -s*0.08);
+          ctx.fill();
+          ctx.restore();
+      };
+      drawNostril(1); 
+      drawNostril(-1);
+      
+      ctx.beginPath();
+      ctx.moveTo(s*0.9, -s*0.25);
+      ctx.quadraticCurveTo(s*1.2, 0, s*0.9, s*0.25);
+      ctx.stroke();
+
+      ctx.restore();
+    } else if (snake.skinId === 'komodo') {
+      ctx.save();
+      ctx.translate(head.x, head.y);
+      ctx.rotate(snake.angle);
+
+      const radius = hRadius;
+      const s = radius * 1.6;
+      
+      const time = Date.now() * 0.005;
+      const flicker = Math.sin(time);
+      if (Math.sin(time * 0.4) > 0.4) { 
+          ctx.strokeStyle = "#e8c39e"; 
+          ctx.lineWidth = 3; 
+          ctx.beginPath();
+          ctx.moveTo(s, 0);
+          ctx.lineTo(s * 1.4 + flicker * s * 0.2, 0);
+          ctx.lineTo(s * 1.7 + flicker * s * 0.3, -s * 0.2);
+          ctx.moveTo(s * 1.4 + flicker * s * 0.2, 0);
+          ctx.lineTo(s * 1.7 + flicker * s * 0.3, s * 0.2);
+          ctx.stroke();
+      }
+
+      const headPath = new Path2D();
+      headPath.moveTo(-s * 0.2, -s * 0.7); 
+      headPath.quadraticCurveTo(s * 0.4, -s * 0.8, s * 0.8, -s * 0.5); 
+      headPath.lineTo(s * 1.4, -s * 0.25); 
+      headPath.quadraticCurveTo(s * 1.6, 0, s * 1.4, s * 0.25); 
+      headPath.lineTo(s * 0.8, s * 0.5); 
+      headPath.quadraticCurveTo(s * 0.4, s * 0.8, -s * 0.2, s * 0.7); 
+      headPath.closePath();
+
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.7)';
+      ctx.shadowBlur = 15;
+      ctx.shadowOffsetY = 10;
+      
+      const headGrad = ctx.createRadialGradient(s * 0.5, 0, 0, s * 0.5, 0, s * 1.5);
+      headGrad.addColorStop(0, '#6b5e52'); 
+      headGrad.addColorStop(0.6, '#3b322a'); 
+      headGrad.addColorStop(1, '#1c1714'); 
+
+      ctx.fillStyle = headGrad;
+      ctx.fill(headPath);
+      ctx.shadowColor = 'transparent';
+
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.4)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0); ctx.lineTo(s * 1.3, 0);
+      ctx.moveTo(s * 0.3, 0); ctx.quadraticCurveTo(s*0.5, -s*0.2, s * 0.7, -s * 0.5);
+      ctx.moveTo(s * 0.3, 0); ctx.quadraticCurveTo(s*0.5, s*0.2, s * 0.7, s * 0.5);
+      ctx.moveTo(s * 0.9, 0); ctx.lineTo(s * 1.2, -s * 0.15);
+      ctx.moveTo(s * 0.9, 0); ctx.lineTo(s * 1.2, s * 0.15);
+      ctx.stroke();
+
+      const eyeX = s * 0.65;
+      const eyeY = s * 0.45;
+      [1, -1].forEach(side => {
+          ctx.save();
+          ctx.translate(eyeX, side * eyeY);
+          ctx.rotate(side * 0.1); 
+          
+          ctx.fillStyle = "#0a0807";
+          ctx.beginPath();
+          ctx.ellipse(0, 0, s*0.25, s*0.18, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          const iris = ctx.createRadialGradient(0, 0, 0, 0, 0, s*0.2);
+          iris.addColorStop(0, "#c29129");
+          iris.addColorStop(0.5, "#7a560e");
+          iris.addColorStop(1, "#291c01");
+          ctx.fillStyle = iris;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, s*0.2, s*0.14, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = "#000000";
+          ctx.beginPath();
+          ctx.ellipse(0, 0, s*0.07, s*0.07, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+          ctx.beginPath();
+          ctx.ellipse(s*0.06, -s*0.05, s*0.05, s*0.03, -Math.PI/4, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.restore();
+      });
+
+      [1, -1].forEach(side => {
+          ctx.fillStyle = "#000000";
+          ctx.beginPath();
+          ctx.ellipse(s * 1.35, side * s * 0.15, s*0.06, s*0.04, side * 0.3, 0, Math.PI * 2);
+          ctx.fill();
+      });
+
+      ctx.restore();
+    } else {
+      ctx.fillStyle = snake.isBoosting ? '#fff' : snake.color1;
+      ctx.beginPath(); ctx.arc(head.x, head.y, hRadius, 0, Math.PI * 2); ctx.fill();
+    }
     
     ctx.shadowBlur = 0; // Reset shadow for eyes/emoji/crown
     
-    // Emoji Head support
-    if (snake.skinEmoji && snake.skinEmoji !== '🟢') {
+    // Emoji Head support (Skip eyes/emoji if we just drew the realistic head)
+    if (!['dragon_fuego', 'komodo'].includes(snake.skinId || '') && snake.skinEmoji && snake.skinEmoji !== '🟢') {
       ctx.save();
       ctx.translate(head.x, head.y);
-      ctx.rotate(snake.angle + Math.PI / 2);
-      ctx.font = `${headRadius * 2.2}px Arial`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(snake.skinEmoji, 0, 0);
+      
+      if (snake.skinId === 'phoenix') {
+        // Doble emoji de fuego para el Fénix Eterno
+        const angles = [snake.angle + (60 * Math.PI / 180), snake.angle + (120 * Math.PI / 180)];
+        ctx.font = `${hRadius * 2.2}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        angles.forEach(angle => {
+          ctx.save();
+          ctx.rotate(angle);
+          ctx.fillText(snake.skinEmoji, 0, 0);
+          ctx.restore();
+        });
+      } else {
+        let emojiAngle = snake.angle + Math.PI / 2;
+        if (snake.skinId === 'water_eternal') {
+          emojiAngle += Math.PI; // Invert droplet
+        }
+        ctx.rotate(emojiAngle);
+        ctx.font = `${hRadius * 2.2}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(snake.skinEmoji, 0, 0);
+      }
       ctx.restore();
     } else {
       // Eyes (only if no emoji)
-      const eyeOff = CELL / 4;
+      const eyeOff = (hasGrosor && snake.userId === user.id) ? CELL / 2 : CELL / 4;
       const ex1 = head.x + Math.cos(snake.angle - 0.5) * eyeOff;
       const ey1 = head.y + Math.sin(snake.angle - 0.5) * eyeOff;
       const ex2 = head.x + Math.cos(snake.angle + 0.5) * eyeOff;
@@ -1383,7 +1921,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     // Crown for top 10
     if (topMonedas.includes(snake.userId)) {
       ctx.save();
-      ctx.translate(head.x, head.y - 25 - baseRadius);
+      ctx.translate(head.x, head.y - 25 - bodyRadius);
       ctx.fillStyle = '#fbbf24';
       ctx.beginPath();
       ctx.moveTo(-10, 0);
@@ -1401,7 +1939,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     ctx.fillStyle = 'white';
     ctx.font = 'bold 12px Arial';
     ctx.textAlign = 'center';
-    ctx.fillText(snake.displayName, head.x, head.y - 15 - baseRadius);
+    ctx.fillText(snake.displayName, head.x, head.y - 15 - bodyRadius);
     ctx.restore();
   };
 
@@ -1503,7 +2041,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
       />
 
       {/* Ability Buttons Section */}
-      <div className="absolute bottom-6 left-4 z-[70] flex flex-col gap-3 pointer-events-auto">
+      <div className="absolute bottom-6 left-4 z-[70] flex flex-row items-end gap-4 pointer-events-auto">
         {hasTeleport && (
           <div className="relative">
             <button
@@ -1522,45 +2060,34 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
           </div>
         )}
 
-        {hasStop && (
+        {hasBoostCooldown && (
           <div className="relative">
             <button
-              onClick={() => setIsStopped(!isStopped)}
-              className={`flex h-12 w-12 items-center justify-center rounded-2xl border-2 transition-all active:scale-95 ${isStopped ? 'border-red-500 bg-red-500 text-white shadow-lg shadow-red-500/40' : 'border-gray-700 bg-gray-800/80 text-gray-400 hover:border-gray-500'}`}
+              onMouseDown={() => !isOverheated && setIsBoosting(true)}
+              onMouseUp={() => setIsBoosting(false)}
+              onMouseLeave={() => setIsBoosting(false)}
+              onTouchStart={(e) => { e.preventDefault(); !isOverheated && setIsBoosting(true); }}
+              onTouchEnd={() => setIsBoosting(false)}
+              className={`flex h-16 w-16 items-center justify-center rounded-full border-4 transition-all active:scale-95 ${isOverheated ? 'border-red-600 bg-red-900/50 text-red-500 cursor-not-allowed' : (isBoosting ? 'border-blue-400 bg-blue-500 text-white shadow-lg shadow-blue-500/50' : 'border-blue-600 bg-blue-900/30 text-blue-400')}`}
             >
-              <div className="h-4 w-4 bg-current rounded-sm" />
+              <Zap size={32} className={isBoosting ? 'animate-pulse' : ''} />
+              <svg className="absolute inset-0 -rotate-90" viewBox="0 0 100 100">
+                <circle
+                  cx="50" cy="50" r="45"
+                  fill="none" stroke="currentColor" strokeWidth="4"
+                  strokeDasharray={`${(boostCharge / 5) * 283} 283`}
+                  className="transition-all duration-100"
+                />
+              </svg>
             </button>
-            <span className="mt-1 block text-center text-[8px] font-black uppercase text-white/50">Parar</span>
-          </div>
-        )}
-
-        {hasAutopilot && (
-          <div className="relative">
-            <button
-              onClick={() => setIsAutopilot(!isAutopilot)}
-              className={`flex h-12 w-12 items-center justify-center rounded-2xl border-2 transition-all active:scale-95 ${isAutopilot ? 'border-green-500 bg-green-500/20 text-green-400 shadow-lg shadow-green-500/20' : 'border-gray-700 bg-gray-800/80 text-gray-400 hover:border-gray-500'}`}
-            >
-              <ShieldCheck size={24} />
-            </button>
-            <span className="mt-1 block text-center text-[8px] font-black uppercase text-white/50">Auto</span>
+            <span className={`mt-2 block text-center text-[10px] font-black uppercase ${isOverheated ? 'text-red-500 animate-bounce' : 'text-blue-400'}`}>
+              {isOverheated ? `RECALENTADO (${Math.ceil(cooldownTime)}s)` : 'IMPULSO'}
+            </span>
           </div>
         )}
       </div>
 
-      {/* Floating Texts */}
-      <div className="pointer-events-none fixed inset-0 z-[100]">
-        {floatingTexts.map(ft => (
-          <motion.div
-            key={ft.id}
-            initial={{ opacity: 1, y: ft.y }}
-            animate={{ opacity: 0, y: ft.y - 100 }}
-            className="absolute font-black text-xs uppercase tracking-widest whitespace-nowrap"
-            style={{ left: ft.x, color: ft.color }}
-          >
-            {ft.text}
-          </motion.div>
-        ))}
-      </div>
+      {/* Floating Texts (Moved to Canvas) */}
 
       <AnimatePresence>
         {!isAlive && !isCollecting && !isWinner && (
@@ -1844,7 +2371,7 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
               </div>
             ) : (
               <div className="flex items-center gap-2 rounded-lg bg-purple-900/50 px-3 py-1.5 backdrop-blur-sm border border-purple-500/30">
-                <ShieldCheck size={14} className="text-purple-400" />
+                <Lock size={14} className="text-purple-400" />
                 <span className="text-sm font-black text-white tracking-widest font-mono">
                   {category.replace('private_', '')}
                 </span>

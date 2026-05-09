@@ -18,14 +18,6 @@ export const ALL_ABILITIES: Ability[] = [
     fragmentId: 'frag_teleport'
   },
   {
-    id: 'stop',
-    name: 'Parar Snake',
-    description: 'Permite detener la snake en su lugar indefinidamente.',
-    icon: '🛑',
-    rarity: 'common',
-    fragmentId: 'frag_stop'
-  },
-  {
     id: 'magnet',
     name: 'Imán de Puntos',
     description: 'Atrae puntos y monedas cercanos automáticamente.',
@@ -34,11 +26,19 @@ export const ALL_ABILITIES: Ability[] = [
     fragmentId: 'frag_magnet'
   },
   {
-    id: 'autopilot',
-    name: 'Piloto Automático',
-    description: 'La snake recolecta puntos y esquiva obstáculos por sí sola.',
-    icon: '🤖',
+    id: 'grosor',
+    name: 'Grosor Extremo',
+    description: 'Duplica el grosor y colisión de tu snake de forma permanente.',
+    icon: '🍕',
+    rarity: 'rare',
+    fragmentId: 'frag_grosor'
+  },
+  {
+    id: 'boost_cooldown',
+    name: 'Súper Impulso',
+    description: 'Impulso de 5s con 30s de enfriamiento. ¡Cuidado con el humo!',
+    icon: '🚨',
     rarity: 'legendary',
-    fragmentId: 'frag_autopilot'
+    fragmentId: 'frag_boost'
   }
 ];

@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { User, Skin, Friendship, Notification as GameNotification, SkinListing, Ability } from '../types';
-import { ALL_SKINS } from '../constants';
+import { APP_VERSION, ALL_SKINS, compareVersions } from '../constants';
 import { ALL_ABILITIES } from '../abilities';
 import { motion, AnimatePresence } from 'motion/react';
 import { supabase } from '../lib/supabase';
-import { Coins, Play, ShoppingBag, User as UserIcon, Trophy, ArrowLeft, Plus, Copy, ExternalLink, Check, X, Zap, Users, ShieldCheck, History, LogOut, Trash2, CreditCard, UserPlus, Palette, Search, Send, MessageSquare, Heart, Loader2, Award, Moon, Target, Skull, Sparkles, Settings, Volume2, VolumeX, Gamepad2, UserMinus, Instagram, Youtube, Facebook, Twitch, Calendar, Timer, Download } from 'lucide-react';
+import { Coins, Play, ShoppingBag, User as UserIcon, Trophy, ArrowLeft, Plus, Copy, ExternalLink, Check, X, Zap, Users, ShieldCheck, History, LogOut, Trash2, CreditCard, UserPlus, Palette, Search, Send, MessageSquare, Heart, Loader2, Award, Moon, Target, Skull, Sparkles, Settings, Volume2, VolumeX, Gamepad2, UserMinus, Instagram, Youtube, Facebook, Twitch, Calendar, Timer, Download, Lock } from 'lucide-react';
 import { GoldPointIcon, MonedasIcon } from './Icons';
 import AdminPanel from './AdminPanel';
 import { ARENA_ITEMS, SUCCESS_RATES, ArenaItem } from '../items';
@@ -13,6 +13,7 @@ import { db, handleFirestoreError, auth, OperationType } from '../firebase';
 import { signOut, deleteUser } from 'firebase/auth';
 import { soundManager } from '../lib/sounds';
 import { GoogleGenAI } from "@google/genai";
+import { io, Socket } from 'socket.io-client';
 import ExpandedFriendProfile from './Social/ExpandedFriendProfile';
 import ProfileCustomization from './Social/ProfileCustomization';
 
@@ -25,18 +26,6 @@ const RARITY_ORDER: Record<string, number> = {
   rare: 2,
   common: 1
 };
-
-const APP_VERSION = '1.0.0';
-
-function compareVersions(v1: string, v2: string) {
-  const parts1 = v1.split('.').map(Number);
-  const parts2 = v2.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    if (parts1[i] > (parts2[i] || 0)) return 1;
-    if (parts1[i] < (parts2[i] || 0)) return -1;
-  }
-  return 0;
-}
 
 const DAILY_REWARDS = [
   { day: 1, points: 500, fragments: 1 },
@@ -53,15 +42,19 @@ interface MenuProps {
   onStartGame: (wager: number) => void;
   onStartTraining: (botCount: number, wager: number) => void;
   onStartWager: (wager: number, growthWager: number, category: string) => void;
+  onStartCTF: (wager: number) => void;
+  onUpdateUser?: (user: User) => void;
+  onLogout?: () => void;
   initialRivalId?: string | null;
   onRivalHandled?: () => void;
 }
 
-export default function Menu({ user, onStartGame, onStartTraining, onStartWager, initialRivalId, onRivalHandled }: MenuProps) {
+export default function Menu({ user, onStartGame, onStartTraining, onStartWager, onStartCTF, onUpdateUser, onLogout, initialRivalId, onRivalHandled }: MenuProps) {
   const [view, setView] = useState<'main' | 'shop' | 'inventory' | 'ranking' | 'profile' | 'wallet' | 'fusion'>('main');
   const [showAdmin, setShowAdmin] = useState(false);
   const [wager, setWager] = useState(0);
   const [showWagerModal, setShowWagerModal] = useState(false);
+  const [showCTFModal, setShowCTFModal] = useState(false);
   const [showPrivateModal, setShowPrivateModal] = useState(false);
   const [showCreateConfirm, setShowCreateConfirm] = useState<{code: string, wager: number} | null>(null);
   const [privateRoomId, setPrivateRoomId] = useState('');
@@ -103,6 +96,24 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
   const [showProfileCustomization, setShowProfileCustomization] = useState(false);
   const [showFriendProfile, setShowFriendProfile] = useState<Friendship | null>(null);
   const [trainingWager, setTrainingWager] = useState(0);
+  const [ctfLobbyCounts, setCtfLobbyCounts] = useState<Record<number, number>>({});
+  const socketRef = useRef<Socket | null>(null);
+
+  useEffect(() => {
+    // Connect to socket just for lobby counts
+    const socket = io();
+    socketRef.current = socket;
+
+    socket.on("ctf_lobby_counts", (counts) => {
+      setCtfLobbyCounts(counts);
+    });
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (showFriendProfile) {
@@ -167,11 +178,13 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
   const [showTrainingModal, setShowTrainingModal] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<{ type: 'latest' | 'available' | 'error', msg: string } | null>(null);
+  const [isStartingGame, setIsStartingGame] = useState(false);
 
   const handleCheckUpdate = async () => {
     setIsCheckingUpdate(true);
     setUpdateStatus(null);
     try {
+      // Use getDoc which is more tolerant than a direct service call if offline
       const configSnap = await getDoc(doc(db, 'app_config', 'current'));
       if (configSnap.exists()) {
         const config = configSnap.data();
@@ -182,7 +195,6 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             type: 'available', 
             msg: `Nueva versión disponible: ${latestVersion}` 
           });
-          // Also redirect if it's open
           if (config.downloadUrl) {
             window.open(config.downloadUrl, '_blank');
           }
@@ -196,8 +208,11 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
         setUpdateStatus({ type: 'latest', msg: '¡Estás usando la última versión!' });
       }
     } catch (err) {
-      console.error('Update check error:', err);
-      setUpdateStatus({ type: 'error', msg: 'Error al buscar actualizaciones' });
+      console.warn('Update check failed (offline/unreachable):', err);
+      setUpdateStatus({ 
+        type: 'error', 
+        msg: 'No se pudo conectar al servidor de actualizaciones. Verifica tu conexión.' 
+      });
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -457,25 +472,35 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
     }
 
     try {
-      const userRef = doc(db, 'users', user.id);
-      await updateDoc(userRef, {
-        monedas: user.monedas - monedasCost,
-        coins: user.coins + points
-      }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+      if (!user.isGuest) {
+        const userRef = doc(db, 'users', user.id);
+        await updateDoc(userRef, {
+          monedas: user.monedas - monedasCost,
+          coins: user.coins + points
+        }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
 
-      await supabase.from('profiles').update({
-        monedas: user.monedas - monedasCost,
-        coins: user.coins + points
-      }).eq('id', user.id);
+        await supabase.from('profiles').update({
+          monedas: user.monedas - monedasCost,
+          coins: user.coins + points
+        }).eq('id', user.id);
 
-      await supabase.from('transactions').insert({
-        user_id: user.id,
-        type: 'exchange',
-        currency: 'coins',
-        amount: points,
-        reason: `exchange_monedas_for_points: ${monedasCost} monedas`,
-        timestamp: new Date().toISOString()
-      });
+        await supabase.from('transactions').insert({
+          user_id: user.id,
+          type: 'exchange',
+          currency: 'coins',
+          amount: points,
+          reason: `exchange_monedas_for_points: ${monedasCost} monedas`,
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        const updatedUser = {
+          ...user,
+          monedas: user.monedas - monedasCost,
+          coins: user.coins + points
+        };
+        localStorage.setItem('viborita_guest_data', JSON.stringify(updatedUser));
+        onUpdateUser?.(updatedUser);
+      }
 
       setTicketMessage({ text: `¡Canje exitoso! +${points} Puntos`, type: 'success' });
       setTimeout(() => setTicketMessage(null), 3000);
@@ -497,33 +522,44 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
     const field = type === 'pro' ? 'proAccessUntil' : 'millonarioAccessUntil';
 
     try {
-      const userRef = doc(db, 'users', user.id);
-      
-      // 1. Update User Document
-      await updateDoc(userRef, {
-        coins: user.coins - coinsPrice,
-        monedas: user.monedas - monedasPrice,
-        [field]: expiry
-      }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+      if (!user.isGuest) {
+        const userRef = doc(db, 'users', user.id);
+        
+        // 1. Update User Document
+        await updateDoc(userRef, {
+          coins: user.coins - coinsPrice,
+          monedas: user.monedas - monedasPrice,
+          [field]: expiry
+        }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
 
-      // 2. Log Purchase in TicketPurchases collection
-      await addDoc(collection(db, 'ticketPurchases'), {
-        userId: user.id,
-        email: user.email,
-        type,
-        coinsPrice,
-        monedasPrice,
-        expiry,
-        timestamp: Date.now()
-      }).catch(e => handleFirestoreError(e, OperationType.CREATE, 'ticketPurchases'));
+        // 2. Log Purchase in TicketPurchases collection
+        await addDoc(collection(db, 'ticketPurchases'), {
+          userId: user.id,
+          email: user.email,
+          type,
+          coinsPrice,
+          monedasPrice,
+          expiry,
+          timestamp: Date.now()
+        }).catch(e => handleFirestoreError(e, OperationType.CREATE, 'ticketPurchases'));
 
-      // 3. Sync with Supabase
-      const { error: supabaseError } = await supabase.from('profiles').update({
-        coins: user.coins - coinsPrice,
-        monedas: user.monedas - monedasPrice
-      }).eq('id', user.id);
+        // 3. Sync with Supabase
+        const { error: supabaseError } = await supabase.from('profiles').update({
+          coins: user.coins - coinsPrice,
+          monedas: user.monedas - monedasPrice
+        }).eq('id', user.id);
 
-      if (supabaseError) throw supabaseError;
+        if (supabaseError) throw supabaseError;
+      } else {
+        const updatedUser = {
+          ...user,
+          coins: user.coins - coinsPrice,
+          monedas: user.monedas - monedasPrice,
+          [field]: expiry
+        };
+        localStorage.setItem('viborita_guest_data', JSON.stringify(updatedUser));
+        onUpdateUser?.(updatedUser);
+      }
 
       setTicketMessage({ text: `Entrada ${type.toUpperCase()} comprada por 24hs`, type: 'success' });
       setTimeout(() => setTicketMessage(null), 3000);
@@ -535,6 +571,10 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
   };
 
   const handleClaimDailyReward = async () => {
+    if (user.isGuest) {
+       setGeminiMessage("Inicia sesión con Google para reclamar recompensas diarias permanentes.");
+       return;
+    }
     const userRef = doc(db, 'users', user.id);
     
     try {
@@ -1273,6 +1313,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
   const handleLogout = async () => {
     try {
       await signOut(auth);
+      onLogout?.();
     } catch (e) {
       console.error('Error signing out:', e);
     }
@@ -1371,45 +1412,57 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
     
     if (userBalance < price) return;
     
-    const userRef = doc(db, 'users', user.id);
-    const updateData: any = {
-      ownedSkins: [...user.ownedSkins, skin.id]
-    };
-    
-    if (currency === 'coins') {
-      updateData.coins = user.coins - price;
+    if (!user.isGuest) {
+      const userRef = doc(db, 'users', user.id);
+      const updateData: any = {
+        ownedSkins: [...user.ownedSkins, skin.id]
+      };
+      
+      if (currency === 'coins') {
+        updateData.coins = user.coins - price;
+      } else {
+        updateData.monedas = user.monedas - price;
+      }
+      
+      await updateDoc(userRef, updateData).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+
+      // Sync with Supabase
+      await supabase.from('inventory').insert({
+        user_id: user.id,
+        skin_id: skin.id,
+        acquired_at: new Date().toISOString()
+      });
+
+      // Record transaction
+      await supabase.from('transactions').insert({
+        user_id: user.id,
+        type: 'spent',
+        currency: currency,
+        amount: price,
+        reason: `store_purchase: ${skin.name}`,
+        timestamp: new Date().toISOString()
+      });
+
+      // Update profile balance in Supabase
+      const supabaseUpdate: any = {};
+      if (currency === 'coins') {
+        supabaseUpdate.coins = user.coins - price;
+      } else {
+        supabaseUpdate.monedas = user.monedas - price;
+      }
+      
+      await supabase.from('profiles').update(supabaseUpdate).eq('id', user.id);
     } else {
-      updateData.monedas = user.monedas - price;
+      // Guest Logic
+      const updatedUser = {
+        ...user,
+        ownedSkins: [...user.ownedSkins, skin.id],
+        coins: currency === 'coins' ? user.coins - price : user.coins,
+        monedas: currency === 'monedas' ? user.monedas - price : user.monedas
+      };
+      localStorage.setItem('viborita_guest_data', JSON.stringify(updatedUser));
+      onUpdateUser?.(updatedUser);
     }
-    
-    await updateDoc(userRef, updateData).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
-
-    // Sync with Supabase
-    await supabase.from('inventory').insert({
-      user_id: user.id,
-      skin_id: skin.id,
-      acquired_at: new Date().toISOString()
-    });
-
-    // Record transaction
-    await supabase.from('transactions').insert({
-      user_id: user.id,
-      type: 'spent',
-      currency: currency,
-      amount: price,
-      reason: `store_purchase: ${skin.name}`,
-      timestamp: new Date().toISOString()
-    });
-
-    // Update profile balance in Supabase
-    const supabaseUpdate: any = {};
-    if (currency === 'coins') {
-      supabaseUpdate.coins = user.coins - price;
-    } else {
-      supabaseUpdate.monedas = user.monedas - price;
-    }
-    
-    await supabase.from('profiles').update(supabaseUpdate).eq('id', user.id);
   };
 
   const handleStartFusion = async (item: ArenaItem) => {
@@ -1448,10 +1501,20 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
         if (item.skinId.startsWith('ability_')) {
           const abilityId = item.skinId.replace('ability_', '');
           const ability = ALL_ABILITIES.find(a => a.id === abilityId);
-          setFusionResult({ success: true, ability });
+          if (ability) {
+            setFusionResult({ success: true, ability });
+          } else {
+            console.error("Fusion success but ability not found:", abilityId);
+            setFusionResult({ success: false });
+          }
         } else {
           const skin = ALL_SKINS.find(s => s.id === item.skinId);
-          setFusionResult({ success: true, skin });
+          if (skin) {
+            setFusionResult({ success: true, skin });
+          } else {
+            console.error("Fusion success but skin not found:", item.skinId);
+            setFusionResult({ success: false });
+          }
         }
       } else {
         setFusionResult({ success: false });
@@ -1502,22 +1565,24 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             <Settings size={20} />
           </button>
 
-          <button 
-            onClick={() => setShowDailyRewards(true)}
-            className="absolute left-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-gray-800/80 text-yellow-500 transition-all hover:bg-yellow-600/20 hover:text-yellow-400 border border-white/5 active:scale-95 shadow-lg backdrop-blur-sm z-50"
-            title="Recompensas Diarias"
-          >
-            <Calendar size={20} />
-            {(() => {
-                const lastClaim = user.lastDailyRewardClaim || 0;
-                const lastClaimDate = new Date(lastClaim).toDateString();
-                const nowDate = new Date().toDateString();
-                if (lastClaimDate !== nowDate) {
-                    return <div className="absolute -top-1 -right-1 h-3 w-3 bg-red-500 rounded-full border-2 border-gray-900 animate-pulse" />;
-                }
-                return null;
-            })()}
-          </button>
+          {!user.isGuest && (
+            <button 
+              onClick={() => setShowDailyRewards(true)}
+              className="absolute left-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-gray-800/80 text-yellow-500 transition-all hover:bg-yellow-600/20 hover:text-yellow-400 border border-white/5 active:scale-95 shadow-lg backdrop-blur-sm z-50"
+              title="Recompensas Diarias"
+            >
+              <Calendar size={20} />
+              {(() => {
+                  const lastClaim = user.lastDailyRewardClaim || 0;
+                  const lastClaimDate = new Date(lastClaim).toDateString();
+                  const nowDate = new Date().toDateString();
+                  if (lastClaimDate !== nowDate) {
+                      return <div className="absolute -top-1 -right-1 h-3 w-3 bg-red-500 rounded-full border-2 border-gray-900 animate-pulse" />;
+                  }
+                  return null;
+              })()}
+            </button>
+          )}
 
           {user.email === 'martinezlucasn@gmail.com' && (
             <button 
@@ -1547,17 +1612,29 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
           </div>
 
           <div className="flex flex-col items-center w-full">
-            <div className="bg-gray-800/80 px-4 py-1.5 rounded-t-xl border-t border-x border-white/10 backdrop-blur-md flex items-center gap-2">
-              {user.avatarConfig && (
-                <img 
-                  src={`https://api.dicebear.com/7.x/${user.avatarConfig.style}/svg?seed=${user.avatarConfig.seed}`}
-                  className="h-4 w-4 rounded-full bg-blue-500/10"
-                  alt="Perfil"
-                />
-              )}
-              <p className="text-[10px] font-black uppercase tracking-widest text-blue-400">
-                Bienvenido <span className="text-white">{user.displayName}</span>
-              </p>
+            <div 
+              className="bg-gray-800/80 px-4 py-2 rounded-t-xl border-t border-x border-white/10 backdrop-blur-md flex items-center gap-3 cursor-pointer hover:bg-gray-700/80 transition-colors group transform active:scale-95"
+              onClick={() => setView('profile')}
+            >
+              <div className="relative">
+                {user.avatarConfig ? (
+                  <img 
+                    src={`https://api.dicebear.com/7.x/${user.avatarConfig.style}/svg?seed=${user.avatarConfig.seed}`}
+                    className="h-8 w-8 rounded-lg bg-blue-500/10 border border-blue-500/30 group-hover:border-blue-400 transition-colors"
+                    alt="Perfil"
+                  />
+                ) : (
+                  <div className="h-8 w-8 rounded-lg bg-blue-500/20 flex items-center justify-center group-hover:bg-blue-500/30 transition-colors">
+                    <UserIcon className="text-blue-400" size={16} />
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-col">
+                <p className="text-[8px] font-black uppercase tracking-[0.2em] text-blue-400 leading-none mb-1">
+                  Bienvenido
+                </p>
+                <span className="text-sm font-black text-white leading-none uppercase italic tracking-tighter">{user.displayName}</span>
+              </div>
             </div>
             <div className="relative w-full mb-4 flex flex-col items-center justify-center gap-4 rounded-2xl rounded-t-none bg-gray-800/50 px-6 py-4 backdrop-blur-md border border-white/5">
               <div className="flex items-center justify-center gap-4 w-full">
@@ -1577,7 +1654,13 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
               </div>
               <div 
                 className="flex flex-col items-center pl-2 cursor-pointer group"
-                onClick={() => setView('wallet')}
+                onClick={() => {
+                  if (user.isGuest) {
+                    setGeminiMessage("Para desbloquear esta opcion debes iniciar sesion con Google.");
+                    return;
+                  }
+                  setView('wallet');
+                }}
               >
                 <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-1 group-hover:text-blue-300 transition-colors">Monedas</span>
                 <div className="flex items-center gap-2">
@@ -1604,8 +1687,14 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
 
           <div className="flex flex-col gap-3">
             <button
-              onClick={() => setShowWagerModal(true)}
-              className="group relative flex w-full items-center justify-center gap-3 rounded-2xl bg-blue-600 py-6 text-xl font-black uppercase tracking-tighter transition-all hover:bg-blue-500 active:scale-95 shadow-[0_0_20px_rgba(37,99,235,0.3)]"
+              onClick={() => {
+                if (user.isGuest) {
+                  setGeminiMessage("Para desbloquear esta opcion debes iniciar sesion con Google.");
+                  return;
+                }
+                setShowWagerModal(true);
+              }}
+              className={`group relative flex w-full items-center justify-center gap-3 rounded-2xl bg-blue-600 py-6 text-xl font-black uppercase tracking-tighter transition-all ${user.isGuest ? 'opacity-50 grayscale' : 'hover:bg-blue-500 active:scale-95 shadow-[0_0_20px_rgba(37,99,235,0.3)]'}`}
             >
               <div className="absolute left-4 top-1/2 flex -translate-y-1/2 items-center gap-1.5 rounded-full bg-black/20 px-2 py-1">
                 <span className="relative flex h-2 w-2">
@@ -1616,6 +1705,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
               </div>
               <MonedasIcon size={24} /> 
               <span>COMPETICIÓN GLOBAL</span>
+              {user.isGuest && <Lock size={16} className="absolute right-4" />}
             </button>
 
             <button
@@ -1627,6 +1717,21 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             </button>
 
             <button
+              onClick={() => {
+                if (user.isGuest) {
+                  setGeminiMessage("Para desbloquear esta opcion debes iniciar sesion con Google.");
+                  return;
+                }
+                setShowCTFModal(true);
+              }}
+              className={`flex w-full items-center justify-center gap-3 rounded-2xl bg-gradient-to-r from-red-600/40 to-blue-600/40 py-6 text-xl font-black uppercase tracking-tighter transition-all ${user.isGuest ? 'opacity-50 grayscale' : 'hover:from-red-600/60 hover:to-blue-600/60 active:scale-95 border border-red-500/30 shadow-[0_0_20px_rgba(220,38,38,0.2)] group'}`}
+            >
+              <Target size={24} className={`text-red-500 ${!user.isGuest && 'group-hover:rotate-12'} transition-transform`} />
+              <span>ROBA LA BANDERA</span>
+              {user.isGuest && <Lock size={16} className="absolute right-4" />}
+            </button>
+
+            <button
               onClick={() => setView('fusion')}
               className="flex w-full items-center justify-center gap-3 rounded-2xl bg-gradient-to-r from-purple-600/40 to-blue-600/40 py-6 text-xl font-black uppercase tracking-tighter transition-all hover:from-purple-600/60 hover:to-blue-600/60 active:scale-95 border border-purple-500/30 shadow-[0_0_20px_rgba(147,51,234,0.2)] group"
             >
@@ -1635,11 +1740,18 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             </button>
 
             <button
-              onClick={() => setView('wallet')}
-              className="flex w-full items-center justify-center gap-3 rounded-2xl bg-blue-600/20 py-6 text-xl font-black uppercase tracking-tighter transition-all hover:bg-blue-600/30 active:scale-95 border border-blue-500/30 shadow-lg"
+              onClick={() => {
+                if (user.isGuest) {
+                  setGeminiMessage("Para desbloquear esta opcion debes iniciar sesion con Google.");
+                  return;
+                }
+                setView('wallet');
+              }}
+              className={`flex w-full items-center justify-center gap-3 rounded-2xl bg-blue-600/20 py-6 text-xl font-black uppercase tracking-tighter transition-all ${user.isGuest ? 'opacity-50 grayscale' : 'hover:bg-blue-600/30 active:scale-95 border border-blue-500/30 shadow-lg'}`}
             >
               <CreditCard size={24} className="text-blue-400" />
               <span>MI BILLETERA</span>
+              {user.isGuest && <Lock size={16} className="absolute right-4" />}
             </button>
           </div>
 
@@ -1666,27 +1778,65 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
               <span className="text-[10px] uppercase tracking-widest">Tienda</span>
             </button>
             <button
-              onClick={() => setView('ranking')}
-              className="flex flex-col items-center justify-center gap-1 rounded-xl bg-gray-800 py-4 font-bold hover:bg-gray-700 border border-white/5"
+              onClick={() => {
+                if (user.isGuest) {
+                  setGeminiMessage("Para desbloquear esta opcion debes iniciar sesion con Google.");
+                  return;
+                }
+                setView('ranking');
+              }}
+              className={`flex flex-col items-center justify-center gap-1 rounded-xl bg-gray-800 py-4 font-bold hover:bg-gray-700 border border-white/5 ${user.isGuest ? 'opacity-50 grayscale' : ''}`}
             >
               <Trophy size={20} className="text-yellow-500" />
-              <span className="text-[10px] uppercase tracking-widest">Ranking</span>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] uppercase tracking-widest">Ranking</span>
+                {user.isGuest && <Lock size={10} />}
+              </div>
             </button>
           </div>
 
+          {user.isGuest && (
+            <div className="flex justify-center mt-6">
+              <button 
+                onClick={() => handleLogout()}
+                className="text-red-500 font-black italic uppercase tracking-tighter hover:text-red-400 transition-all active:scale-95"
+              >
+                iniciar sesion con google
+              </button>
+            </div>
+          )}
+
           <div className="mt-8 flex items-center justify-center gap-6 border-t border-white/5 pt-8">
-            <button className="text-gray-500 transition-all hover:scale-110 hover:text-pink-500" title="Instagram">
+            <a 
+              href="https://www.instagram.com/viboritaonline"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-gray-500 transition-all hover:scale-110 hover:text-pink-500" 
+              title="Instagram"
+            >
               <Instagram size={24} />
-            </button>
-            <button className="text-gray-500 transition-all hover:scale-110 hover:text-blue-500" title="Facebook">
+            </a>
+            <a 
+              href="https://www.facebook.com/share/1JLEVJJCCo/?mibextid=wwXIfr"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-gray-500 transition-all hover:scale-110 hover:text-blue-500" 
+              title="Facebook"
+            >
               <Facebook size={24} />
-            </button>
+            </a>
             <button className="text-gray-500 transition-all hover:scale-110 hover:text-red-500" title="YouTube">
               <Youtube size={24} />
             </button>
-            <button className="text-gray-500 transition-all hover:scale-110 hover:text-purple-500" title="Twitch">
+            <a 
+              href="https://m.twitch.tv/viboritaonline/home"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-gray-500 transition-all hover:scale-110 hover:text-purple-500" 
+              title="Twitch"
+            >
               <Twitch size={24} />
-            </button>
+            </a>
           </div>
         </div>
       )}
@@ -1695,9 +1845,17 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
         <div className="w-full max-w-md rounded-3xl bg-gray-900/90 p-8 backdrop-blur-xl border border-white/10 shadow-2xl">
           <div className="mb-8 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="rounded-full bg-blue-500/20 p-2">
-                <UserIcon className="text-blue-400" size={24} />
-              </div>
+              {user.avatarConfig ? (
+                <img 
+                  src={`https://api.dicebear.com/7.x/${user.avatarConfig.style}/svg?seed=${user.avatarConfig.seed}`}
+                  className="h-10 w-10 rounded-xl bg-blue-500/10 border border-blue-500/30"
+                  alt="Perfil"
+                />
+              ) : (
+                <div className="rounded-full bg-blue-500/20 p-2">
+                  <UserIcon className="text-blue-400" size={24} />
+                </div>
+              )}
               <h2 className="text-3xl font-black italic tracking-tighter text-white uppercase">Mi Perfil</h2>
             </div>
             <button onClick={() => setView('main')} className="text-gray-400 hover:text-white">
@@ -1790,7 +1948,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
 
                       return medals.map((medal, idx) => (
                         <button
-                          key={`medal-box-${medal.id}-${idx}`}
+                          key={`medal-box-v3-${medal.id}-${idx}`}
                           onClick={() => setSelectedMedal(medal)}
                           className={`group relative flex aspect-square items-center justify-center rounded-xl bg-black/40 border transition-all hover:border-white/20 active:scale-95 ${medal.unlocked ? 'border-white/10 shadow-lg' : 'border-transparent opacity-30 filter grayscale hover:opacity-100'}`}
                           style={{ borderColor: medal.unlocked ? `${medal.color}44` : 'transparent' }}
@@ -1919,7 +2077,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                       {friendships.filter(f => f.status === 'pending' && f.requesterId !== user.id).map((f, idx) => {
                         const requester = friendProfiles[f.requesterId];
                         return (
-                          <div key={`pending-req-list-${f.id || idx}`} className="flex items-center justify-between rounded-xl bg-yellow-500/5 p-3 border border-yellow-500/20">
+                          <div key={`pending-req-list-v6-${f.id || 'no-id'}-${idx}`} className="flex items-center justify-between rounded-xl bg-yellow-500/5 p-3 border border-yellow-500/20">
                             <div className="flex items-center gap-3">
                               {requester?.avatarConfig ? (
                                 <img 
@@ -1971,7 +2129,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                       
                       return (
                         <div 
-                          key={`friend-acc-v2-${f.id || idx}`} 
+                          key={`friend-acc-v6-${f.id || 'no-id'}-${idx}`} 
                           onClick={() => {
                             if (friend) {
                               const friendshipRecord = friendships.find(f_rec => f_rec.uids.includes(friend.id));
@@ -2084,7 +2242,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
 
                         return (
                           <div 
-                            key={`market-listing-global-${listing.id || idx}`}
+                            key={`market-listing-global-v11-${listing.id || listing.sellerId || 'no-id'}-${idx}`}
                             className="flex items-center justify-between rounded-xl bg-white/5 p-3 border border-white/5 hover:border-blue-500/30 transition-all"
                           >
                             <div className="flex items-center gap-3">
@@ -2282,10 +2440,12 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             </div>
             
             <div className="max-h-[300px] space-y-3 overflow-y-auto pr-2 custom-scrollbar">
-              {withdrawalHistory.map((w, idx) => (
-                <div key={`withdraw-transaction-row-${w.id || idx}-${idx}`} className="rounded-xl bg-white/5 p-4 border border-white/5 hover:bg-white/10 transition-colors">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-[10px] font-bold text-gray-500">{new Date(w.timestamp).toLocaleDateString()}</span>
+              {withdrawalHistory.map((w, idx) => {
+                const uniqueKey = `withdraw-v4-${w.id || 'no-id'}-${idx}`;
+                return (
+                  <div key={uniqueKey} className="rounded-xl bg-white/5 p-4 border border-white/5 hover:bg-white/10 transition-colors">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10px] font-bold text-gray-500">{new Date(w.timestamp).toLocaleDateString()}</span>
                     <span className={`rounded-full px-2 py-0.5 text-[8px] font-black uppercase tracking-widest ${w.status === 'completed' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'}`}>
                       {w.status === 'completed' ? 'Completado' : 'Pendiente'}
                     </span>
@@ -2303,7 +2463,8 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                     )}
                   </div>
                 </div>
-              ))}
+              );
+            })}
               {withdrawalHistory.length === 0 && (
                 <div className="flex flex-col items-center justify-center py-12 rounded-2xl bg-white/5 border border-dashed border-white/10">
                   <History size={32} className="text-gray-700 mb-2" />
@@ -2341,7 +2502,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
               const currentTime = Date.now();
               return (
               <div 
-                key={`global-rank-row-${player.id}-${idx}-${player.coins}`} 
+                key={`global-rank-v11-${player.id}-${idx}-${player.coins}`} 
                 className={`flex items-center justify-between rounded-xl p-4 ${player.id === user.id ? 'bg-blue-600/20 border border-blue-500/30' : 'bg-gray-800/50'}`}
               >
                 <div className="flex items-center gap-4">
@@ -2432,7 +2593,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                         const count = user.inventoryItems?.[item.id] || 0;
                         return (
                           <button
-                            key={`fusion-inv-${item.id}`}
+                            key={`fusion-skin-frag-${item.id}`}
                             onClick={() => !isFusing && setFusingItem(item)}
                             className={`group relative flex flex-col items-center justify-center p-4 rounded-2xl border-2 transition-all ${fusingItem?.id === item.id ? 'border-purple-500 bg-purple-600/20' : 'border-gray-800 bg-gray-800/50 hover:border-gray-700'} ${count < 1 ? 'opacity-30 grayscale cursor-not-allowed' : ''}`}
                           >
@@ -2466,7 +2627,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                             const count = user.inventoryItems?.[item.id] || 0;
                             return (
                               <button
-                                key={`fusion-inv-${item.id}`}
+                                key={`fusion-ability-frag-${item.id}`}
                                 onClick={() => !isFusing && setFusingItem(item)}
                                 className={`group relative flex flex-col items-center justify-center p-4 rounded-2xl border-2 transition-all ${fusingItem?.id === item.id ? 'border-purple-500 bg-purple-600/20 shadow-[0_0_15px_rgba(168,85,247,0.2)]' : 'border-gray-800 bg-gray-800/50 hover:border-gray-700'} ${count < 1 ? 'opacity-30 grayscale cursor-not-allowed' : ''}`}
                               >
@@ -2865,7 +3026,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
 
                 return (
                   <div
-                    key={`inv-skin-render-${skinId}-${idx}-${count}`}
+                    key={`inv-skin-render-${skinId}-${idx}`}
                     className={`group relative flex flex-col items-center rounded-2xl border-2 p-4 transition-all ${isEquipped ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-800'}`}
                   >
                     {/* Quantity Badge */}
@@ -3046,7 +3207,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                     const getBasePrice = (s: Skin) => s.price || (s.rarity === 'legendary' ? 15000 : s.rarity === 'epic' ? 10000 : s.rarity === 'rare' ? 5000 : 2000);
                     return getBasePrice(a) - getBasePrice(b);
                   })
-                  .map((skin, idx) => {
+                  .map((skin) => {
                   let price = skin.price || (skin.rarity === 'legendary' ? 15000 : skin.rarity === 'epic' ? 10000 : skin.rarity === 'rare' ? 5000 : 2000);
                   const currency = skin.currency || 'coins';
                   const userBalance = currency === 'coins' ? user.coins : user.monedas;
@@ -3060,7 +3221,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                   
                   return (
                     <button
-                      key={`shop-skin-${skin.id}-${idx}`}
+                      key={`shop-skin-v5-${skin.id}`}
                       onClick={() => handleBuy(skin, price)}
                       disabled={userBalance < price}
                       className={`group relative flex flex-col items-center rounded-2xl border-2 border-gray-700 bg-gray-800 p-4 transition-all hover:border-yellow-500 disabled:opacity-50`}
@@ -3303,9 +3464,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             </div>
 
             <div className="mb-8 flex gap-2">
-              {(['basica', 'pro', 'millonario'] as const).map(cat => (
+              {(['basica', 'pro', 'millonario'] as const).map((cat, idx) => (
                 <button
-                  key={`wager-category-${cat}`}
+                  key={`wager-category-tab-v3-${cat}-${idx}`}
                   onClick={() => setSelectedCategory(cat)}
                   className={`flex-1 rounded-xl py-3 text-xs font-black uppercase tracking-widest transition-all ${selectedCategory === cat ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
                 >
@@ -3317,11 +3478,11 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             <div className="grid grid-cols-2 gap-4">
               {(() => {
                 const categories = {
-                  basica: [50, 100, 150, 200],
-                  pro: [500, 1000, 2000, 3000],
+                  basica: [250, 500, 750, 1000],
+                  pro: [1000, 2000, 3000, 4000],
                   millonario: [5000, 7500, 10000, 15000]
                 };
-                const growthMapping = [50, 100, 150, 200];
+                const growthMapping = [250, 500, 750, 1000];
                 
                 return categories[selectedCategory].map((val, idx) => {
                   const isLocked = (selectedCategory === 'pro' && (!user.proAccessUntil || user.proAccessUntil < Date.now())) ||
@@ -3346,7 +3507,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                     >
                       {isLocked && (
                         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-2xl bg-black/60 backdrop-blur-[2px]">
-                          <ShieldCheck size={24} className="mb-1 text-gray-400" />
+                          <Lock size={24} className="mb-1 text-gray-400" />
                           <span className="text-[8px] font-black uppercase tracking-widest text-white">Bloqueado</span>
                         </div>
                       )}
@@ -3390,8 +3551,61 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             </div>
 
             <p className="mt-8 text-center text-[10px] text-gray-500 uppercase tracking-widest italic">
-              * El crecimiento de la viborita está regulado por categoría
+              * El crecimiento de la viborita es constante en todas las categorías
             </p>
+          </motion.div>
+        </div>
+      )}
+
+      {showCTFModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+          <motion.div
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="w-full max-w-lg rounded-3xl border border-white/10 bg-gray-900 p-8 shadow-2xl"
+          >
+            <div className="mb-6 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <Target size={28} className="text-red-500" />
+                <h3 className="text-2xl font-black italic tracking-tighter text-white uppercase uppercase">Roba la Bandera</h3>
+              </div>
+              <button onClick={() => setShowCTFModal(false)} className="text-gray-500 hover:text-white">
+                <X size={24} />
+              </button>
+            </div>
+
+            <p className="mb-6 text-[10px] text-gray-400 font-bold uppercase tracking-[0.2em] text-center">
+              4 JUGADORES • SIN COLISIÓN • ROBA Y ANOTA
+            </p>
+
+            <div className="grid grid-cols-2 gap-3">
+              {[1000, 2500, 5000, 10000, 20000].map((val) => (
+                <button
+                  key={`ctf-wager-${val}`}
+                  onClick={() => {
+                    onStartCTF(val);
+                    setShowCTFModal(false);
+                  }}
+                  disabled={user.monedas < val}
+                  className="group relative flex flex-col items-center gap-2 rounded-2xl border border-white/5 bg-white/5 p-5 transition-all hover:bg-red-600/20 hover:border-red-500/50 disabled:opacity-30"
+                >
+                  <div className="absolute top-2 right-3 flex items-center gap-1">
+                    <div className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
+                    <span className="text-[10px] font-black text-white">{ctfLobbyCounts[val] || 0}/4</span>
+                  </div>
+                  <MonedasIcon size={32} />
+                  <span className="text-xl font-black text-white">{val.toLocaleString()}</span>
+                  <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Monedas</span>
+                </button>
+              ))}
+            </div>
+            
+            <div className="mt-8 space-y-2 rounded-2xl bg-white/5 p-4 text-[9px] text-gray-500 font-bold uppercase tracking-wider">
+              <div className="flex items-center gap-2"><div className="h-1 w-1 rounded-full bg-red-500" /> Toca la bandera enemiga para capturarla.</div>
+              <div className="flex items-center gap-2"><div className="h-1 w-1 rounded-full bg-red-500" /> Llévala a tu base en la esquina para anotar.</div>
+              <div className="flex items-center gap-2"><div className="h-1 w-1 rounded-full bg-red-500" /> Si te tocan, te roban la bandera.</div>
+              <div className="flex items-center gap-2"><div className="h-1 w-1 rounded-full bg-red-500" /> Si anotan con tu bandera, estas ELIMINADO.</div>
+            </div>
           </motion.div>
         </div>
       )}
@@ -4074,7 +4288,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             )}
             {notifications.map((notif, idx) => (
               <motion.div
-                key={`notif-${notif.id}-${idx}`}
+                key={`notif-v6-${notif.id || 'no-id'}-${idx}`}
                 initial={{ x: 100, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
                 exit={{ x: 100, opacity: 0 }}
@@ -4146,7 +4360,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
 
         {/* Daily Rewards Modal */}
         <AnimatePresence>
-          {showDailyRewards && (
+          {showDailyRewards && !user.isGuest && (
             <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
               <motion.div
                 initial={{ scale: 0.8, opacity: 0, y: 20 }}
@@ -4409,24 +4623,24 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                 <div className="mb-4">
                   <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-blue-400">Apostador de Puntos</p>
                   <div className="flex items-center gap-4 rounded-2xl bg-white/5 p-4 border border-white/5">
-                    <button 
-                      onClick={() => setTrainingWager(prev => Math.max(0, prev - 10))}
-                      className="h-10 w-10 shrink-0 rounded-xl bg-gray-800 flex items-center justify-center text-white hover:bg-gray-700 transition-colors"
-                    >
-                      -10
-                    </button>
                     <input 
                       type="number" 
                       value={trainingWager}
-                      onChange={(e) => setTrainingWager(Math.max(0, parseInt(e.target.value) || 0))}
+                      onChange={(e) => {
+                        const val = Math.max(0, parseInt(e.target.value) || 0);
+                        setTrainingWager(Math.min(user.coins, val));
+                      }}
+                      onBlur={() => {
+                        if (trainingWager > user.coins) {
+                          setTrainingWager(user.coins);
+                        }
+                      }}
                       className="w-full bg-transparent text-center text-2xl font-black text-white outline-none"
                     />
-                    <button 
-                      onClick={() => setTrainingWager(prev => prev + 10)}
-                      className="h-10 w-10 shrink-0 rounded-xl bg-blue-600 flex items-center justify-center text-white hover:bg-blue-500 transition-colors"
-                    >
-                      +10
-                    </button>
+                  </div>
+                  <div className="mt-2 flex items-center justify-center gap-2">
+                    <span className="text-[10px] font-bold text-gray-400">SALDO DISPONIBLE:</span>
+                    <span className="text-[10px] font-black text-blue-400">{user.coins.toLocaleString()} PUNTOS</span>
                   </div>
                   <p className="mt-3 text-[9px] font-bold text-gray-500 uppercase tracking-tighter text-center">
                     la cantidad de puntos apostados define la longitud de tu personaje.
@@ -4435,31 +4649,45 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
 
                 <div className="space-y-4">
                   <button 
-                    onClick={() => {
-                      onStartTraining(5, trainingWager);
-                      setShowTrainingModal(false);
+                    onClick={async () => {
+                      if (trainingWager > user.coins || isStartingGame) return;
+                      setIsStartingGame(true);
+                      try {
+                        await onStartTraining(5, trainingWager);
+                        setShowTrainingModal(false);
+                      } finally {
+                        setIsStartingGame(false);
+                      }
                     }}
-                    className="group flex w-full items-center justify-between rounded-2xl bg-white/5 p-5 border border-white/5 hover:border-green-500/30 hover:bg-green-500/10 transition-all"
+                    disabled={trainingWager > user.coins || isStartingGame}
+                    className="group flex w-full items-center justify-between rounded-2xl bg-white/5 p-5 border border-white/5 hover:border-green-500/30 hover:bg-green-500/10 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <div className="text-left">
                       <p className="text-lg font-black text-white uppercase tracking-tighter">Modo Fácil</p>
                       <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Hasta 5 usuarios - ideal para practicar</p>
                     </div>
-                    <Check size={24} className="text-green-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    {isStartingGame ? <Loader2 className="animate-spin text-green-500" /> : <Check size={24} className="text-green-500 opacity-0 group-hover:opacity-100 transition-opacity" />}
                   </button>
 
                   <button 
-                    onClick={() => {
-                      onStartTraining(50, trainingWager);
-                      setShowTrainingModal(false);
+                    onClick={async () => {
+                      if (trainingWager > user.coins || isStartingGame) return;
+                      setIsStartingGame(true);
+                      try {
+                        await onStartTraining(40, trainingWager);
+                        setShowTrainingModal(false);
+                      } finally {
+                        setIsStartingGame(false);
+                      }
                     }}
-                    className="group flex w-full items-center justify-between rounded-2xl bg-white/5 p-5 border border-white/5 hover:border-red-500/30 hover:bg-red-500/10 transition-all"
+                    disabled={trainingWager > user.coins || isStartingGame}
+                    className="group flex w-full items-center justify-between rounded-2xl bg-white/5 p-5 border border-white/5 hover:border-red-500/30 hover:bg-red-500/10 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <div className="text-left">
                       <p className="text-lg font-black text-white uppercase tracking-tighter">Modo Difícil</p>
-                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Hasta 50 usuarios - desafío extremo</p>
+                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Hasta 40 usuarios - desafío extremo</p>
                     </div>
-                    <Zap size={24} className="text-red-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    {isStartingGame ? <Loader2 className="animate-spin text-red-500" /> : <Zap size={24} className="text-red-500 opacity-0 group-hover:opacity-100 transition-opacity" />}
                   </button>
                 </div>
 
@@ -4600,7 +4828,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                 </div>
 
                 <div className="p-6 bg-black/20 text-center">
-                  <p className="text-[9px] font-black uppercase tracking-[0.2em] text-gray-600">Viborita 1.0.0 - Bonus Arg.</p>
+                  <p className="text-[9px] font-black uppercase tracking-[0.2em] text-gray-600">Viborita 1.1.4 - bonusapp</p>
                 </div>
               </motion.div>
             </div>
