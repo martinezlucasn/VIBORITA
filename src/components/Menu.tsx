@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { User, Skin, Friendship, Notification as GameNotification, SkinListing, Ability } from '../types';
+import { User, Skin, Friendship, SkinListing, Ability } from '../types';
 import { APP_VERSION, ALL_SKINS, compareVersions } from '../constants';
 import { ALL_ABILITIES } from '../abilities';
 import { motion, AnimatePresence } from 'motion/react';
@@ -47,9 +47,11 @@ interface MenuProps {
   onLogout?: () => void;
   initialRivalId?: string | null;
   onRivalHandled?: () => void;
+  initialCTFModal?: boolean;
+  onCTFModalHandled?: () => void;
 }
 
-export default function Menu({ user, onStartGame, onStartTraining, onStartWager, onStartCTF, onUpdateUser, onLogout, initialRivalId, onRivalHandled }: MenuProps) {
+export default function Menu({ user, onStartGame, onStartTraining, onStartWager, onStartCTF, onUpdateUser, onLogout, initialRivalId, onRivalHandled, initialCTFModal, onCTFModalHandled }: MenuProps) {
   const [view, setView] = useState<'main' | 'shop' | 'inventory' | 'ranking' | 'profile' | 'wallet' | 'fusion'>('main');
   const [showAdmin, setShowAdmin] = useState(false);
   const [wager, setWager] = useState(0);
@@ -62,18 +64,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
   const [roomError, setRoomError] = useState<string | null>(null);
   const [showJoinConfirm, setShowJoinConfirm] = useState<{id: string, wager: number} | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<'basica' | 'pro' | 'millonario'>('basica');
-  const [showBuyPoints, setShowBuyPoints] = useState(false);
-  const [buyAmount, setBuyAmount] = useState(100);
-  const [copied, setCopied] = useState(false);
   const [onlineCount, setOnlineCount] = useState(0);
   const [topPlayers, setTopPlayers] = useState<User[]>([]);
-  const [shopCategory, setShopCategory] = useState<'skins' | 'tickets'>('skins');
-  const [ticketMessage, setTicketMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
-  const [selectedCoinPackage, setSelectedCoinPackage] = useState<number | null>(null);
-  const [selectedPointPackage, setSelectedPointPackage] = useState<{ points: number, price: number } | null>(null);
-  const [isCreatingPreference, setIsCreatingPreference] = useState(false);
   const [friendships, setFriendships] = useState<Friendship[]>([]);
-  const [notifications, setNotifications] = useState<GameNotification[]>([]);
   const [friendSearch, setFriendSearch] = useState('');
   const [selectedFriend, setSelectedFriend] = useState<User | null>(null);
   const [showTransferModal, setShowTransferModal] = useState(false);
@@ -84,13 +77,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
   const [tempUsername, setTempUsername] = useState(user.displayName);
   const [isCheckingUsername, setIsCheckingUsername] = useState(false);
   const [duelWager, setDuelWager] = useState(50);
-  const [selectedMedal, setSelectedMedal] = useState<any>(null);
-  const [unlockedMedalIds, setUnlockedMedalIds] = useState<string[]>([]);
-  const [medalNotification, setMedalNotification] = useState<any>(null);
   const [geminiMessage, setGeminiMessage] = useState<string | null>(null);
   const [isGeminiLoading, setIsGeminiLoading] = useState(false);
   const [purchaseConfirmation, setPurchaseConfirmation] = useState<{ skin: Skin; price: number } | null>(null);
-  const [showArenaTicketsModal, setShowArenaTicketsModal] = useState(false);
   const [showDailyRewards, setShowDailyRewards] = useState(false);
   const [selectedDayForPreview, setSelectedDayForPreview] = useState<number | null>(null);
   const [showProfileCustomization, setShowProfileCustomization] = useState(false);
@@ -140,6 +129,13 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
     }
   }, [initialRivalId, friendships, onRivalHandled]);
 
+  useEffect(() => {
+    if (initialCTFModal) {
+      setShowCTFModal(true);
+      onCTFModalHandled?.();
+    }
+  }, [initialCTFModal, onCTFModalHandled]);
+
   // Check daily reward eligibility
   useEffect(() => {
     const checkDailyReward = () => {
@@ -178,93 +174,83 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
   const [showTrainingModal, setShowTrainingModal] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<{ type: 'latest' | 'available' | 'error', msg: string } | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [isDownloading, setIsDownloading] = useState(false);
   const [isStartingGame, setIsStartingGame] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [selectedMedal, setSelectedMedal] = useState<string | null>(null);
+  const [selectedCoinPackage, setSelectedCoinPackage] = useState<number | null>(null);
+  const [selectedPointPackage, setSelectedPointPackage] = useState<any | null>(null);
+  const [isCreatingPreference, setIsCreatingPreference] = useState(false);
+  const [showArenaTicketsModal, setShowArenaTicketsModal] = useState(false);
 
   const handleCheckUpdate = async () => {
+    // Abrir la URL inmediatamente para evitar el bloqueo de ventanas emergentes (necesita gesto de usuario síncrono)
+    const updateUrl = 'https://viborita-the-classic-snake-game-955968394030.us-east1.run.app';
+    const isAndroid = /Android/i.test(navigator.userAgent);
+    
+    try {
+      if (isAndroid) {
+        // En Android intentamos forzar la apertura en Chrome para evitar problemas de sesión en WebViews
+        const chromeIntent = `intent://${updateUrl.replace(/^https?:\/\//, '')}#Intent;scheme=https;package=com.android.chrome;end`;
+        window.open(chromeIntent, '_blank');
+      } else {
+        window.open(updateUrl, '_blank');
+      }
+    } catch (e) {
+      console.warn('Popup blocked or intent failed:', e);
+      // Fallback si falla el intent o el popup blocker es muy agresivo
+      window.location.href = updateUrl;
+    }
+
     setIsCheckingUpdate(true);
     setUpdateStatus(null);
+    
     try {
-      // Use getDoc which is more tolerant than a direct service call if offline
-      const configSnap = await getDoc(doc(db, 'app_config', 'current'));
-      if (configSnap.exists()) {
-        const config = configSnap.data();
-        const latestVersion = config.version || '0.0.0';
-        
-        if (compareVersions(APP_VERSION, latestVersion) < 0) {
-          setUpdateStatus({ 
-            type: 'available', 
-            msg: `Nueva versión disponible: ${latestVersion}` 
-          });
-          if (config.downloadUrl) {
-            window.open(config.downloadUrl, '_blank');
-          }
-        } else {
+      // Simulación de descarga rápida
+      setUpdateStatus({ 
+        type: 'available', 
+        msg: '¡Nueva Versión Detectada!' 
+      });
+
+      // Start simulated download
+      setIsDownloading(true);
+      setDownloadProgress(0);
+
+      const duration = 4000; // 4 seconds to download
+      const interval = 50;
+      const steps = duration / interval;
+      let currentStep = 0;
+
+      const timer = setInterval(() => {
+        currentStep++;
+        const progress = Math.min(Math.round((currentStep / steps) * 100), 100);
+        setDownloadProgress(progress);
+
+        if (progress >= 100) {
+          clearInterval(timer);
+          setIsDownloading(false);
+          setIsCheckingUpdate(false);
+          
           setUpdateStatus({ 
             type: 'latest', 
-            msg: '¡Estás usando la última versión!' 
+            msg: '¡Actualización lista!' 
           });
+          
+          setGeminiMessage("¡El proceso ha comenzado! Se ha abierto el enlace en tu navegador. Si ves una solicitud de inicio de sesión, asegúrate de estar usando el enlace 'Shared' de tu aplicación. 🐍");
         }
-      } else {
-        setUpdateStatus({ type: 'latest', msg: '¡Estás usando la última versión!' });
-      }
+      }, interval);
+
     } catch (err) {
-      console.warn('Update check failed (offline/unreachable):', err);
+      console.warn('Update check failed:', err);
+      setIsCheckingUpdate(false);
+      setIsDownloading(false);
       setUpdateStatus({ 
         type: 'error', 
-        msg: 'No se pudo conectar al servidor de actualizaciones. Verifica tu conexión.' 
+        msg: 'Error al buscar actualizaciones.' 
       });
-    } finally {
-      setIsCheckingUpdate(false);
     }
   };
-
-  useEffect(() => {
-    const acceptedFriends = friendships.filter(f => f.status === 'accepted').length;
-    const maxMatches = Math.max(0, ...friendships.map(f => f.gamesPlayed || 0));
-    const botKills = user.botKills || 0;
-    const insomnia = user.insomniaCount || 0;
-    const money = user.highScoreMonedas || 0;
-
-    const currentMedals = [
-      { id: 'f_b', name: 'Amistad de Bronce', unlocked: acceptedFriends >= 10 },
-      { id: 'f_s', name: 'Amistad de Plata', unlocked: acceptedFriends >= 50 },
-      { id: 'f_g', name: 'Amistad de Oro', unlocked: acceptedFriends >= 100 },
-      { id: 'f_p', name: 'Amistad de Platino', unlocked: acceptedFriends >= 1000 },
-      { id: 'd_b', name: 'Duelo de Bronce', unlocked: maxMatches >= 500 },
-      { id: 'd_s', name: 'Duelo de Plata', unlocked: maxMatches >= 1000 },
-      { id: 'd_g', name: 'Duelo de Oro', unlocked: maxMatches >= 2500 },
-      { id: 'm_b', name: 'Dinero de Bronce', unlocked: money >= 1000 },
-      { id: 'm_s', name: 'Dinero de Plata', unlocked: money >= 10000 },
-      { id: 'm_g', name: 'Dinero de Oro', unlocked: money >= 500000 },
-      { id: 'e_b', name: 'Eliminador de Bronce', unlocked: botKills >= 10 },
-      { id: 'e_s', name: 'Eliminador de Plata', unlocked: botKills >= 100 },
-      { id: 'e_g', name: 'Eliminador de Oro', unlocked: botKills >= 1000 },
-      { id: 'i_b', name: 'Insomnio de Bronce', unlocked: insomnia >= 1 },
-      { id: 'i_s', name: 'Insomnio de Plata', unlocked: insomnia >= 30 },
-      { id: 'i_g', name: 'Insomnio de Oro', unlocked: insomnia >= 365 },
-    ];
-
-    const allUnlocked = currentMedals.filter(m => m.unlocked).map(m => m.id);
-    const newlyUnlocked = currentMedals.filter(m => m.unlocked && !unlockedMedalIds.includes(m.id));
-    
-    if (newlyUnlocked.length > 0) {
-      // If it's the first run (unlockedMedalIds is empty), don't notify for everything
-      if (unlockedMedalIds.length > 0) {
-        setMedalNotification(newlyUnlocked[0]);
-        setTimeout(() => setMedalNotification(null), 5000);
-      }
-      setUnlockedMedalIds(allUnlocked);
-    }
-
-    // Persist the count to the user profile so friends can see it
-    // Check every time stats change to ensure DB is in sync
-    if (user.id && allUnlocked.length !== user.trophies) {
-      const userRef = doc(db, 'users', user.id);
-      updateDoc(userRef, {
-        trophies: allUnlocked.length
-      }).catch(e => console.error("Error updating trophies count:", e));
-    }
-  }, [friendships, user.botKills, user.insomniaCount, user.highScoreMonedas, unlockedMedalIds, user.id, user.trophies]);
 
   useEffect(() => {
     const checkInsomnia = async () => {
@@ -324,58 +310,6 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
   const [profileTab, setProfileTab] = useState<'general' | 'friends'>('general');
   const [inventoryTab, setInventoryTab] = useState<'skins' | 'abilities'>('skins');
   const [friendToDelete, setFriendToDelete] = useState<{id: string, name: string} | null>(null);
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const paymentStatus = params.get('payment') || params.get('status');
-    const paymentId = params.get('payment_id') || params.get('collection_id');
-    
-    if (paymentId && (paymentStatus === 'success' || paymentStatus === 'approved')) {
-      // Trigger manual check immediately to avoid waiting for webhook
-      const checkPayment = async () => {
-        try {
-          const response = await fetch(`/api/check-payment/${paymentId}`);
-          const data = await response.json();
-          if (data.success) {
-            setTicketMessage({ text: '¡Pago verificado y acreditado correctamente!', type: 'success' });
-            
-            // Get AI personalized message
-            if (data.amount && data.type) {
-              setIsGeminiLoading(true);
-              try {
-                const aiResponse = await ai.models.generateContent({
-                  model: "gemini-3-flash-preview",
-                  contents: `Un usuario (${user.displayName}) acaba de comprar ${data.amount} ${data.type === 'points' ? 'Puntos' : 'Monedas'}. Di algo motivador o divertido sobre su compra para el juego 'Viborita' (juego de snakes neon con apuestas). Mantén el mensaje corto (máximo 15 palabras) y en español.`,
-                });
-                setGeminiMessage(aiResponse.text);
-              } catch (aiErr) {
-                console.error("Gemini error:", aiErr);
-              } finally {
-                setIsGeminiLoading(false);
-              }
-            }
-          } else if (data.status === 'approved' && data.already_processed) {
-            setTicketMessage({ text: 'Pago ya procesado. Tus monedas ya deberían estar acreditadas.', type: 'success' });
-          } else {
-            setTicketMessage({ text: 'Verificando pago...tus monedas se acreditarán en segundos.', type: 'success' });
-          }
-        } catch (err) {
-          console.error("Error verifying payment:", err);
-          setTicketMessage({ text: 'Pago aprobado. La acreditación puede demorar unos segundos.', type: 'success' });
-        }
-      };
-
-      checkPayment();
-      
-      // Clean up URL
-      window.history.replaceState({}, document.title, window.location.pathname);
-      setTimeout(() => setTicketMessage(null), 8000);
-    } else if (paymentStatus === 'failure' || paymentStatus === 'rejected') {
-      setTicketMessage({ text: 'El pago fue cancelado o rechazado.', type: 'error' });
-      window.history.replaceState({}, document.title, window.location.pathname);
-      setTimeout(() => setTicketMessage(null), 5000);
-    }
-  }, []);
 
   useEffect(() => {
     if (geminiMessage) {
@@ -452,22 +386,10 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
     return () => unsubscribe();
   }, [user.id]);
 
-  useEffect(() => {
-    const q = query(collection(db, 'notifications'), where('toId', '==', user.id), where('status', '==', 'pending'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const notifsMap = new Map<string, GameNotification>();
-      snapshot.forEach(doc => {
-        notifsMap.set(doc.id, { id: doc.id, ...doc.data() } as GameNotification);
-      });
-      setNotifications(Array.from(notifsMap.values()));
-    }, (e) => handleFirestoreError(e, OperationType.LIST, 'notifications'));
-    return () => unsubscribe();
-  }, [user.id]);
-
   const handleExchangePoints = async (points: number, monedasCost: number) => {
     if (user.monedas < monedasCost) {
-      setTicketMessage({ text: 'Monedas insuficientes', type: 'error' });
-      setTimeout(() => setTicketMessage(null), 3000);
+      setProfileMessage({ text: 'Monedas insuficientes', type: 'error' });
+      setTimeout(() => setProfileMessage(null), 3000);
       return;
     }
 
@@ -477,21 +399,13 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
         await updateDoc(userRef, {
           monedas: user.monedas - monedasCost,
           coins: user.coins + points
-        }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
+        });
 
         await supabase.from('profiles').update({
           monedas: user.monedas - monedasCost,
           coins: user.coins + points
         }).eq('id', user.id);
 
-        await supabase.from('transactions').insert({
-          user_id: user.id,
-          type: 'exchange',
-          currency: 'coins',
-          amount: points,
-          reason: `exchange_monedas_for_points: ${monedasCost} monedas`,
-          timestamp: new Date().toISOString()
-        });
       } else {
         const updatedUser = {
           ...user,
@@ -502,71 +416,12 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
         onUpdateUser?.(updatedUser);
       }
 
-      setTicketMessage({ text: `¡Canje exitoso! +${points} Puntos`, type: 'success' });
-      setTimeout(() => setTicketMessage(null), 3000);
+      setProfileMessage({ text: `¡Canje exitoso! +${points} Puntos`, type: 'success' });
+      setTimeout(() => setProfileMessage(null), 3000);
     } catch (e) {
       console.error('Error in handleExchangePoints:', e);
-      setTicketMessage({ text: 'Error al procesar el canje', type: 'error' });
-      setTimeout(() => setTicketMessage(null), 3000);
-    }
-  };
-
-  const handleBuyTicket = async (type: 'pro' | 'millonario', coinsPrice: number, monedasPrice: number) => {
-    if (user.coins < coinsPrice || user.monedas < monedasPrice) {
-      setTicketMessage({ text: 'Saldo insuficiente', type: 'error' });
-      setTimeout(() => setTicketMessage(null), 3000);
-      return;
-    }
-
-    const expiry = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
-    const field = type === 'pro' ? 'proAccessUntil' : 'millonarioAccessUntil';
-
-    try {
-      if (!user.isGuest) {
-        const userRef = doc(db, 'users', user.id);
-        
-        // 1. Update User Document
-        await updateDoc(userRef, {
-          coins: user.coins - coinsPrice,
-          monedas: user.monedas - monedasPrice,
-          [field]: expiry
-        }).catch(e => handleFirestoreError(e, OperationType.UPDATE, 'users/' + user.id));
-
-        // 2. Log Purchase in TicketPurchases collection
-        await addDoc(collection(db, 'ticketPurchases'), {
-          userId: user.id,
-          email: user.email,
-          type,
-          coinsPrice,
-          monedasPrice,
-          expiry,
-          timestamp: Date.now()
-        }).catch(e => handleFirestoreError(e, OperationType.CREATE, 'ticketPurchases'));
-
-        // 3. Sync with Supabase
-        const { error: supabaseError } = await supabase.from('profiles').update({
-          coins: user.coins - coinsPrice,
-          monedas: user.monedas - monedasPrice
-        }).eq('id', user.id);
-
-        if (supabaseError) throw supabaseError;
-      } else {
-        const updatedUser = {
-          ...user,
-          coins: user.coins - coinsPrice,
-          monedas: user.monedas - monedasPrice,
-          [field]: expiry
-        };
-        localStorage.setItem('viborita_guest_data', JSON.stringify(updatedUser));
-        onUpdateUser?.(updatedUser);
-      }
-
-      setTicketMessage({ text: `Entrada ${type.toUpperCase()} comprada por 24hs`, type: 'success' });
-      setTimeout(() => setTicketMessage(null), 3000);
-    } catch (e) {
-      console.error('Error in handleBuyTicket:', e);
-      setTicketMessage({ text: 'Error al procesar la compra. Reintenta.', type: 'error' });
-      setTimeout(() => setTicketMessage(null), 3000);
+      setProfileMessage({ text: 'Error al procesar el canje', type: 'error' });
+      setTimeout(() => setProfileMessage(null), 3000);
     }
   };
 
@@ -637,13 +492,13 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
       });
 
       // UI Feedback - currentCycle will update via onSnapshot in App.tsx
-      setTicketMessage({ text: '¡Recompensa reclamada con éxito!', type: 'success' });
-      setTimeout(() => setTicketMessage(null), 4000);
+      setProfileMessage({ text: '¡Recompensa reclamada con éxito!', type: 'success' });
+      setTimeout(() => setProfileMessage(null), 4000);
     } catch (e: any) {
       console.error("Error claiming daily reward:", e);
       if (e.message !== "Ya reclamaste hoy") {
-        setTicketMessage({ text: 'Error al reclamar recompensa', type: 'error' });
-        setTimeout(() => setTicketMessage(null), 3000);
+        setProfileMessage({ text: 'Error al reclamar recompensa', type: 'error' });
+        setTimeout(() => setProfileMessage(null), 3000);
       }
     }
   };
@@ -771,86 +626,94 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
 
   const handleWithdrawListing = async (listing: SkinListing) => {
     try {
+      // 1. Delete the listing from Firestore
+      await deleteDoc(doc(db, 'skinSales', listing.id));
+      
+      // 2. Return the skin to the user
       const userRef = doc(db, 'users', user.id);
-      const listingRef = doc(db, 'skinSales', listing.id);
-
-      await runTransaction(db, async (transaction) => {
-        const userDoc = await transaction.get(userRef);
-        if (!userDoc.exists()) throw new Error("Usuario no encontrado");
-        
-        const listingDoc = await transaction.get(listingRef);
-        if (!listingDoc.exists()) throw new Error("Publicación no encontrada");
-        if (listingDoc.data().status !== 'active') throw new Error("La publicación ya no está activa");
-
-        transaction.update(userRef, {
-          ownedSkins: arrayUnion(listing.skinId)
-        });
-        transaction.delete(listingRef);
+      await updateDoc(userRef, {
+        ownedSkins: arrayUnion(listing.skinId)
       });
-
-      setProfileMessage({ text: 'Skin retirada y devuelta al inventario', type: 'success' });
+      
+      setProfileMessage({ text: 'Publicación retirada. La skin ha vuelto a tu inventario.', type: 'success' });
     } catch (e) {
-      console.error("Error withdrawing listing:", e);
-      setProfileMessage({ text: 'Error al retirar la skin', type: 'error' });
+      console.error('Error withdrawing listing:', e);
+      setProfileMessage({ text: 'Error al retirar la publicación', type: 'error' });
     }
     setTimeout(() => setProfileMessage(null), 3000);
   };
 
-  const handleClaimMedalReward = async (medalId: string) => {
-    if (medalId !== 'f_p') return;
-    if (user.claimedPlatinumReward) return;
-
+  const handleCreatePreference = async (amount: number, type: 'points' | 'monedas', value: number, priceOverride?: number) => {
+    setIsCreatingPreference(true);
     try {
-      const userRef = doc(db, 'users', user.id);
-      await updateDoc(userRef, {
-        ownedSkins: arrayUnion('lightning'),
-        claimedPlatinumReward: true
+      const response = await fetch('/api/create-preference', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.id,
+          amount: priceOverride || amount,
+          type,
+          value,
+          description: type === 'points' ? `Carga de ${value} Puntos` : `Compra de ${value} Monedas`
+        })
       });
-      setProfileMessage({ text: '¡Felicidades! Has reclamado el Rayo Eterno ⚡', type: 'success' });
-      setSelectedMedal(prev => prev ? { ...prev, claimed: true } : null);
+      const data = await response.json();
+      if (data.init_point) {
+        window.location.href = data.init_point;
+      }
     } catch (e) {
-      console.error("Error claiming reward:", e);
-      setProfileMessage({ text: 'Error al reclamar la skin', type: 'error' });
+      console.error('Error creating preference:', e);
+      setProfileMessage({ text: 'Error al conectar con Mercado Pago', type: 'error' });
+    } finally {
+      setIsCreatingPreference(false);
+      setTimeout(() => setProfileMessage(null), 3000);
     }
-    setTimeout(() => setProfileMessage(null), 3000);
   };
 
   const handleInviteFriend = async (friendId: string, wager: number) => {
-    if (user.monedas < wager) {
-      setProfileMessage({ text: 'No tienes suficientes monedas', type: 'error' });
-      return;
-    }
-
     try {
-      const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
-      
-      // Create private room
-      await setDoc(doc(db, 'privateRooms', roomId), {
-        id: roomId,
+      const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
+      const roomRef = doc(db, 'privateRooms', roomCode);
+      await setDoc(roomRef, {
+        id: roomCode,
         creatorId: user.id,
-        wager,
+        invitedId: friendId,
+        wager: wager,
         createdAt: Date.now(),
         status: 'open'
       });
-
-      // Send notification
-      await addDoc(collection(db, 'notifications'), {
-        type: 'game_invite',
-        fromId: user.id,
-        fromName: user.displayName,
-        toId: friendId,
-        roomId,
-        wager,
-        status: 'pending',
-        timestamp: Date.now()
-      });
-
-      setProfileMessage({ text: 'Invitación enviada', type: 'success' });
-      onStartWager(wager, 10, `private_${roomId}`);
+      setProfileMessage({ text: `¡Invitación enviada! Código: ${roomCode}`, type: 'success' });
     } catch (e) {
       console.error('Error inviting friend:', e);
       setProfileMessage({ text: 'Error al enviar invitación', type: 'error' });
     }
+    setTimeout(() => setProfileMessage(null), 3000);
+  };
+
+  const handleBuyTicket = async (type: 'pro' | 'millonario', price: number, coinCost: number) => {
+    if (user.coins < price || user.monedas < coinCost) {
+      setProfileMessage({ text: 'Saldo insuficiente', type: 'error' });
+      return;
+    }
+
+    try {
+      const userRef = doc(db, 'users', user.id);
+      const accessField = type === 'pro' ? 'proAccessUntil' : 'millonarioAccessUntil';
+      const duration = 24 * 60 * 60 * 1000; // 24 hours
+      
+      await updateDoc(userRef, {
+        coins: increment(-price),
+        monedas: increment(-coinCost),
+        [accessField]: Date.now() + duration
+      });
+      
+      setProfileMessage({ text: `¡Acceso ${type.toUpperCase()} activado por 24hs!`, type: 'success' });
+      setShowArenaTicketsModal(false);
+    } catch (e) {
+      console.error('Error buying ticket:', e);
+      setProfileMessage({ text: 'Error al procesar compra', type: 'error' });
+    }
+    setTimeout(() => setProfileMessage(null), 3000);
   };
 
   const handleConfirmUsername = async () => {
@@ -1130,37 +993,6 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
 
   const equippedSkin = ALL_SKINS.find(s => s.id === user.equippedSkin) || ALL_SKINS[0];
 
-  const handleCreatePreference = async (amount: number, type: 'monedas' | 'points' = 'monedas', pointsAmount: number = 0, price?: number) => {
-    setIsCreatingPreference(true);
-    try {
-      // Use window.location.origin to ensure we point to the current server instance
-      const response = await fetch(`${window.location.origin}/api/create-preference`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          amount,
-          userId: user.id,
-          email: user.email,
-          type,
-          pointsAmount,
-          price: price || amount
-        })
-      });
-
-      const data = await response.json();
-      if (data.init_point) {
-        window.location.href = data.init_point;
-      } else {
-        throw new Error(data.error || 'Error al crear el pago');
-      }
-    } catch (error) {
-      console.error('Error:', error);
-      setTicketMessage({ text: 'Error al conectar con Mercado Pago', type: 'error' });
-      setTimeout(() => setTicketMessage(null), 3000);
-    } finally {
-      setIsCreatingPreference(false);
-    }
-  };
 
   const handleEquip = async (skinId: string) => {
     const userRef = doc(db, 'users', user.id);
@@ -1652,33 +1484,18 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                   </motion.span>
                 </div>
               </div>
-              <div 
-                className="flex flex-col items-center pl-2 cursor-pointer group"
-                onClick={() => {
-                  if (user.isGuest) {
-                    setGeminiMessage("Para desbloquear esta opcion debes iniciar sesion con Google.");
-                    return;
-                  }
-                  setView('wallet');
-                }}
-              >
-                <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-1 group-hover:text-blue-300 transition-colors">Monedas</span>
+              <div className="flex flex-col items-center">
+                <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-1">Monedas</span>
                 <div className="flex items-center gap-2">
                   <MonedasIcon size={20} />
                   <motion.span 
                     key={`menu-monedas-${user.monedas}`}
                     initial={{ scale: 1.2, color: '#60a5fa' }}
                     animate={{ scale: 1, color: '#ffffff' }}
-                    className="text-2xl font-black group-hover:text-blue-200 transition-colors"
+                    className="text-2xl font-black"
                   >
                     {user.monedas}
                   </motion.span>
-                  <div 
-                    className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-white shadow-lg transition-transform group-hover:scale-110 active:scale-95"
-                    title="Cargar Monedas"
-                  >
-                    <Plus size={14} strokeWidth={3} />
-                  </div>
                 </div>
               </div>
             </div>
@@ -1739,20 +1556,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
               <span className="bg-clip-text text-transparent bg-gradient-to-r from-white via-white to-purple-200">CAJA DE FUSIÓN</span>
             </button>
 
-            <button
-              onClick={() => {
-                if (user.isGuest) {
-                  setGeminiMessage("Para desbloquear esta opcion debes iniciar sesion con Google.");
-                  return;
-                }
-                setView('wallet');
-              }}
-              className={`flex w-full items-center justify-center gap-3 rounded-2xl bg-blue-600/20 py-6 text-xl font-black uppercase tracking-tighter transition-all ${user.isGuest ? 'opacity-50 grayscale' : 'hover:bg-blue-600/30 active:scale-95 border border-blue-500/30 shadow-lg'}`}
-            >
-              <CreditCard size={24} className="text-blue-400" />
-              <span>MI BILLETERA</span>
-              {user.isGuest && <Lock size={16} className="absolute right-4" />}
-            </button>
+
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -2077,7 +1881,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                       {friendships.filter(f => f.status === 'pending' && f.requesterId !== user.id).map((f, idx) => {
                         const requester = friendProfiles[f.requesterId];
                         return (
-                          <div key={`pending-req-list-v6-${f.id || 'no-id'}-${idx}`} className="flex items-center justify-between rounded-xl bg-yellow-500/5 p-3 border border-yellow-500/20">
+                          <div key={`friend-req-pending-${f.id}-${idx}`} className="flex items-center justify-between rounded-xl bg-yellow-500/5 p-3 border border-yellow-500/20">
                             <div className="flex items-center gap-3">
                               {requester?.avatarConfig ? (
                                 <img 
@@ -2129,7 +1933,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                       
                       return (
                         <div 
-                          key={`friend-acc-v6-${f.id || 'no-id'}-${idx}`} 
+                          key={`friend-acc-${f.id}-${idx}`} 
                           onClick={() => {
                             if (friend) {
                               const friendshipRecord = friendships.find(f_rec => f_rec.uids.includes(friend.id));
@@ -2242,7 +2046,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
 
                         return (
                           <div 
-                            key={`market-listing-global-v11-${listing.id || listing.sellerId || 'no-id'}-${idx}`}
+                            key={`market-listing-global-${listing.id}-${idx}`}
                             className="flex items-center justify-between rounded-xl bg-white/5 p-3 border border-white/5 hover:border-blue-500/30 transition-all"
                           >
                             <div className="flex items-center gap-3">
@@ -2291,7 +2095,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
           <AnimatePresence mode="popLayout">
             {profileMessage && (
               <motion.div
-                key={`profile-msg-${profileMessage.type}-${profileMessage.text.substring(0, 10)}`}
+                key={`profile-msg-${profileMessage.type}-${profileMessage.text.substring(0, 10)}-${Date.now()}`}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 10 }}
@@ -2502,7 +2306,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
               const currentTime = Date.now();
               return (
               <div 
-                key={`global-rank-v11-${player.id}-${idx}-${player.coins}`} 
+                key={`global-rank-${player.id}-${idx}`} 
                 className={`flex items-center justify-between rounded-xl p-4 ${player.id === user.id ? 'bg-blue-600/20 border border-blue-500/30' : 'bg-gray-800/50'}`}
               >
                 <div className="flex items-center gap-4">
@@ -2589,11 +2393,11 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                       {[...ARENA_ITEMS]
                         .filter(item => !item.id.startsWith('frag_'))
                         .sort((a, b) => RARITY_ORDER[b.rarity] - RARITY_ORDER[a.rarity])
-                        .map((item) => {
+                        .map((item, idx) => {
                         const count = user.inventoryItems?.[item.id] || 0;
                         return (
                           <button
-                            key={`fusion-skin-frag-${item.id}`}
+                            key={`fusion-skin-frag-${item.id}-${idx}`}
                             onClick={() => !isFusing && setFusingItem(item)}
                             className={`group relative flex flex-col items-center justify-center p-4 rounded-2xl border-2 transition-all ${fusingItem?.id === item.id ? 'border-purple-500 bg-purple-600/20' : 'border-gray-800 bg-gray-800/50 hover:border-gray-700'} ${count < 1 ? 'opacity-30 grayscale cursor-not-allowed' : ''}`}
                           >
@@ -2623,11 +2427,11 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                           {[...ARENA_ITEMS]
                             .filter(item => item.id.startsWith('frag_'))
                             .sort((a, b) => RARITY_ORDER[b.rarity] - RARITY_ORDER[a.rarity])
-                            .map((item) => {
+                            .map((item, idx) => {
                             const count = user.inventoryItems?.[item.id] || 0;
                             return (
                               <button
-                                key={`fusion-ability-frag-${item.id}`}
+                                key={`fusion-ability-frag-${item.id}-${idx}`}
                                 onClick={() => !isFusing && setFusingItem(item)}
                                 className={`group relative flex flex-col items-center justify-center p-4 rounded-2xl border-2 transition-all ${fusingItem?.id === item.id ? 'border-purple-500 bg-purple-600/20 shadow-[0_0_15px_rgba(168,85,247,0.2)]' : 'border-gray-800 bg-gray-800/50 hover:border-gray-700'} ${count < 1 ? 'opacity-30 grayscale cursor-not-allowed' : ''}`}
                               >
@@ -3142,7 +2946,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             <AnimatePresence mode="wait">
               {profileMessage && (
                 <motion.div
-                  key={`inventory-msg-${profileMessage.text}`}
+                  key={`inventory-msg-v11-${profileMessage.text}-${Date.now()}`}
                   initial={{ opacity: 0, scale: 0.9 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 1.1 }}
@@ -3207,7 +3011,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                     const getBasePrice = (s: Skin) => s.price || (s.rarity === 'legendary' ? 15000 : s.rarity === 'epic' ? 10000 : s.rarity === 'rare' ? 5000 : 2000);
                     return getBasePrice(a) - getBasePrice(b);
                   })
-                  .map((skin) => {
+                  .map((skin, idx) => {
                   let price = skin.price || (skin.rarity === 'legendary' ? 15000 : skin.rarity === 'epic' ? 10000 : skin.rarity === 'rare' ? 5000 : 2000);
                   const currency = skin.currency || 'coins';
                   const userBalance = currency === 'coins' ? user.coins : user.monedas;
@@ -3221,7 +3025,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                   
                   return (
                     <button
-                      key={`shop-skin-v5-${skin.id}`}
+                      key={`shop-skin-v5-${skin.id}-${idx}`}
                       onClick={() => handleBuy(skin, price)}
                       disabled={userBalance < price}
                       className={`group relative flex flex-col items-center rounded-2xl border-2 border-gray-700 bg-gray-800 p-4 transition-all hover:border-yellow-500 disabled:opacity-50`}
@@ -3244,111 +3048,6 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                     </button>
                   );
                 })}
-              </div>
-            </section>
-
-            {/* Points Exchange Section */}
-            <section>
-              <div className="mb-6 flex items-center justify-between">
-                <h3 className="text-xl font-black uppercase tracking-widest text-white border-l-4 border-blue-400 pl-4">Canje de Puntos</h3>
-                <div className="rounded-full bg-blue-500/10 px-3 py-1 border border-blue-500/20">
-                  <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Usa tus Monedas</span>
-                </div>
-              </div>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                {[
-                  { points: 1000, cost: 100 },
-                  { points: 2000, cost: 175 }
-                ].map((pkg, idx) => (
-                  <button
-                    key={`shop-exchange-pkg-${pkg.points}-${idx}`}
-                    onClick={() => handleExchangePoints(pkg.points, pkg.cost)}
-                    disabled={user.monedas < pkg.cost}
-                    className="group relative flex items-center justify-between rounded-2xl border border-white/5 bg-white/5 p-6 transition-all hover:bg-blue-600/20 hover:border-blue-500/50 disabled:opacity-30"
-                  >
-                    <div className="flex items-center gap-4">
-                      <div className="rounded-xl bg-yellow-500/20 p-3">
-                        <GoldPointIcon size={24} />
-                      </div>
-                      <div className="text-left">
-                        <p className="text-2xl font-black text-white">{pkg.points.toLocaleString()}</p>
-                        <p className="text-[10px] font-bold uppercase tracking-widest text-yellow-500">Puntos</p>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-xs font-bold uppercase tracking-widest text-gray-500 mb-1">Costo</p>
-                      <div className="flex items-center gap-2 justify-end">
-                        <span className="text-xl font-black text-blue-400">{pkg.cost}</span>
-                        <MonedasIcon size={16} />
-                      </div>
-                    </div>
-                    {user.monedas < pkg.cost && (
-                      <div className="absolute -top-2 right-4 rounded-full bg-red-500 px-2 py-0.5 text-[8px] font-bold text-white uppercase">Insuficiente</div>
-                    )}
-                  </button>
-                ))}
-              </div>
-            </section>
-
-            {/* Tickets Section */}
-            <section>
-              <div className="mb-6">
-                <h3 className="text-xl font-black uppercase tracking-widest text-white border-l-4 border-blue-500 pl-4">Entradas de Arena</h3>
-              </div>
-              <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-                <div className="rounded-3xl border border-blue-500/30 bg-blue-900/20 p-8 text-center backdrop-blur-md">
-                  <div className="mb-4 flex justify-center">
-                    <div className="rounded-full bg-blue-500/20 p-4">
-                      <ShieldCheck size={48} className="text-blue-400" />
-                    </div>
-                  </div>
-                  <h3 className="text-2xl font-black uppercase tracking-tighter text-white">Entrada Arena PRO</h3>
-                  <p className="mt-2 text-sm text-gray-400">Acceso ilimitado por 24 horas a la categoría PRO</p>
-                  <div className="mt-6 flex flex-col items-center justify-center gap-2">
-                    <div className="flex items-center gap-2">
-                      <GoldPointIcon size={20} />
-                      <span className="text-2xl font-black text-yellow-500">5000</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <MonedasIcon size={20} />
-                      <span className="text-2xl font-black text-blue-400">500</span>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => handleBuyTicket('pro', 5000, 500)}
-                    disabled={user.coins < 5000 || user.monedas < 500 || (user.proAccessUntil && user.proAccessUntil > Date.now())}
-                    className="mt-8 w-full rounded-xl bg-blue-600 py-4 font-black uppercase tracking-widest text-white transition-all hover:bg-blue-500 disabled:opacity-50"
-                  >
-                    {user.proAccessUntil && user.proAccessUntil > Date.now() ? 'Entrada Activa' : 'Comprar Entrada'}
-                  </button>
-                </div>
-
-                <div className="rounded-3xl border border-yellow-500/30 bg-yellow-900/20 p-8 text-center backdrop-blur-md">
-                  <div className="mb-4 flex justify-center">
-                    <div className="rounded-full bg-yellow-500/20 p-4">
-                      <Trophy size={48} className="text-yellow-500" />
-                    </div>
-                  </div>
-                  <h3 className="text-2xl font-black uppercase tracking-tighter text-white">Entrada Arena MILLONARIO</h3>
-                  <p className="mt-2 text-sm text-gray-400">Acceso ilimitado por 24 horas a la categoría MILLONARIO</p>
-                  <div className="mt-6 flex flex-col items-center justify-center gap-2">
-                    <div className="flex items-center gap-2">
-                      <GoldPointIcon size={20} />
-                      <span className="text-2xl font-black text-yellow-500">10000</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <MonedasIcon size={20} />
-                      <span className="text-2xl font-black text-blue-400">1000</span>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => handleBuyTicket('millonario', 10000, 1000)}
-                    disabled={user.coins < 10000 || user.monedas < 1000 || (user.millonarioAccessUntil && user.millonarioAccessUntil > Date.now())}
-                    className="mt-8 w-full rounded-xl bg-yellow-600 py-4 font-black uppercase tracking-widest text-white transition-all hover:bg-yellow-500 disabled:opacity-50"
-                  >
-                    {user.millonarioAccessUntil && user.millonarioAccessUntil > Date.now() ? 'Entrada Activa' : 'Comprar Entrada'}
-                  </button>
-                </div>
               </div>
             </section>
           </div>
@@ -3387,13 +3086,13 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             </motion.div>
           )}
 
-          {ticketMessage && (
+          {profileMessage && (
             <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`mt-4 rounded-xl p-3 text-center text-xs font-bold ${ticketMessage.type === 'success' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}
+              className={`mt-4 rounded-xl p-3 text-center text-xs font-bold ${profileMessage.type === 'success' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}
             >
-              {ticketMessage.text}
+              {profileMessage.text}
             </motion.div>
           )}
 
@@ -3579,9 +3278,9 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             </p>
 
             <div className="grid grid-cols-2 gap-3">
-              {[1000, 2500, 5000, 10000, 20000].map((val) => (
+              {[1000, 2500, 5000, 10000, 20000].map((val, idx) => (
                 <button
-                  key={`ctf-wager-${val}`}
+                  key={`ctf-wager-${val}-${idx}`}
                   onClick={() => {
                     onStartCTF(val);
                     setShowCTFModal(false);
@@ -3781,163 +3480,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
           </motion.div>
         </div>
       )}
-      {showBuyPoints && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
-          <motion.div
-            initial={{ scale: 0.9, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            className="w-full max-w-md rounded-3xl border border-gray-700 bg-gray-900 p-8 shadow-2xl"
-          >
-            <div className="mb-6 flex items-center justify-between">
-              <h3 className="text-2xl font-black italic tracking-tighter text-blue-400">COMPRAR PUNTOS</h3>
-              <button onClick={() => setShowBuyPoints(false)} className="text-gray-500 hover:text-white">
-                <X size={24} />
-              </button>
-            </div>
-
-            <div className="space-y-6">
-              <div className="rounded-2xl bg-gray-800 p-4">
-                <label className="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">Cantidad de Puntos</label>
-                <div className="flex items-center gap-4">
-                  <input
-                    type="number"
-                    value={buyAmount || ''}
-                    onChange={(e) => {
-                      const val = e.target.value === '' ? 0 : parseInt(e.target.value);
-                      setBuyAmount(isNaN(val) ? 0 : val);
-                    }}
-                    className="w-full bg-transparent text-3xl font-black text-white outline-none"
-                  />
-                  <GoldPointIcon size={24} />
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between rounded-2xl border border-blue-500/30 bg-blue-500/10 p-4">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-widest text-blue-400">Total a Pagar</p>
-                  <p className="text-2xl font-black text-white">${buyAmount} ARS</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-[10px] font-bold text-gray-500 uppercase">1 Punto = $1 ARS</p>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <p className="text-sm text-gray-400">Transfiere el monto exacto a través de <span className="font-bold text-blue-400">Mercado Pago</span> al siguiente alias:</p>
-                <div className="flex items-center justify-between rounded-xl bg-gray-800 p-4">
-                  <span className="font-mono text-xl font-bold text-white">latorre44</span>
-                  <button
-                    onClick={copyAlias}
-                    className="flex items-center gap-2 rounded-lg bg-gray-700 px-3 py-2 text-xs font-bold transition-colors hover:bg-gray-600"
-                  >
-                    {copied ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
-                    {copied ? 'Copiado' : 'Copiar Alias'}
-                  </button>
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-yellow-500/10 p-4 text-xs text-yellow-500">
-                <p className="font-bold">⚠️ Importante:</p>
-                <p>Una vez realizada la transferencia, los puntos se acreditarán manualmente. Asegúrate de que el monto coincida con la cantidad solicitada.</p>
-              </div>
-
-              <button
-                onClick={() => setShowBuyPoints(false)}
-                className="w-full rounded-2xl bg-blue-600 py-4 text-lg font-black uppercase tracking-tighter text-white transition-all hover:bg-blue-500"
-              >
-                Entendido
-              </button>
-            </div>
-          </motion.div>
-        </div>
-      )}
       {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} adminUser={user} />}
-
-      <AnimatePresence>
-        {selectedMedal && (
-          <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="w-full max-w-sm rounded-[2.5rem] bg-gray-900 p-8 border border-white/10 shadow-3xl text-center relative"
-            >
-              <button 
-                onClick={() => setSelectedMedal(null)}
-                className="absolute top-6 right-6 text-gray-500 hover:text-white transition-colors"
-              >
-                <X size={24} />
-              </button>
-
-              <div 
-                className={`mx-auto mb-6 flex h-24 w-24 items-center justify-center rounded-3xl bg-black/40 border-4 ${selectedMedal.unlocked ? 'animate-bounce-subtle' : 'grayscale opacity-30 shadow-none'}`}
-                style={{ 
-                  borderColor: selectedMedal.color,
-                  boxShadow: selectedMedal.unlocked ? `0 0 40px ${selectedMedal.color}22` : 'none'
-                }}
-              >
-                <div style={{ color: selectedMedal.color }}>
-                  {selectedMedal.icon && typeof selectedMedal.icon === 'object' && 'props' in selectedMedal.icon ? (
-                    (() => {
-                      const Icon = selectedMedal.icon.type;
-                      return <Icon size={48} {...selectedMedal.icon.props} />;
-                    })()
-                  ) : null }
-                </div>
-              </div>
-
-              <h3 className="text-2xl font-black italic tracking-tighter text-white uppercase mb-2">
-                {selectedMedal.name}
-              </h3>
-              
-              <div className="rounded-2xl bg-white/5 p-4 border border-white/5 mb-6">
-                <p className="text-sm font-bold text-gray-400 mb-4">
-                  {selectedMedal.desc}
-                </p>
-                
-                <div className="space-y-2">
-                  <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-gray-500">
-                    <span>Progreso</span>
-                    <span>{selectedMedal.current.toLocaleString()} / {selectedMedal.goal.toLocaleString()}</span>
-                  </div>
-                  <div className="h-2 w-full bg-black/40 rounded-full overflow-hidden border border-white/5">
-                    <motion.div 
-                      initial={{ width: 0 }}
-                      animate={{ width: `${Math.min(100, (selectedMedal.current / selectedMedal.goal) * 100)}%` }}
-                      className="h-full shadow-[0_0_10px_rgba(255,255,255,0.2)]"
-                      style={{ backgroundColor: selectedMedal.color }}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className={`flex flex-col items-center justify-center gap-4 py-3 rounded-2xl font-black uppercase tracking-widest text-xs ${selectedMedal.unlocked ? 'bg-green-500/20 text-green-400 border border-green-500/10' : 'bg-gray-800 text-gray-500'}`}>
-                {selectedMedal.unlocked ? (
-                  <>
-                    <div className="flex items-center gap-2">
-                       <ShieldCheck size={16} /> ¡DESBLOQUEADA!
-                    </div>
-                    {selectedMedal.id === 'f_p' && !user.claimedPlatinumReward && (
-                      <button
-                        onClick={() => handleClaimMedalReward('f_p')}
-                        className="bg-yellow-500 text-black px-6 py-3 rounded-xl text-xs font-black shadow-lg shadow-yellow-500/20 hover:bg-yellow-400 active:scale-95 transition-all"
-                      >
-                        RECLAMAR SKIN "RAYO ETERNO"
-                      </button>
-                    )}
-                    {selectedMedal.id === 'f_p' && user.claimedPlatinumReward && (
-                      <span className="text-[10px] text-yellow-500">Recompensa Reclamada ✓</span>
-                    )}
-                  </>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <X size={16} /> BLOQUEADA
-                  </div>
-                )}
-              </div>
-            </motion.div>
-          </div>
-        )}
 
         {showCreateConfirm && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-4 backdrop-blur-md">
@@ -4264,99 +3807,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
           </div>
         )}
 
-        {/* Notifications Overlay */}
-        <div className="fixed top-6 right-6 z-[100] flex flex-col gap-4 pointer-events-none">
-          <AnimatePresence>
-            {medalNotification && (
-              <motion.div
-                key={`medal-unlock-${medalNotification.id}`}
-                initial={{ x: 100, opacity: 0 }}
-                animate={{ x: 0, opacity: 1 }}
-                exit={{ x: 100, opacity: 0 }}
-                className="w-80 rounded-2xl bg-gradient-to-br from-yellow-600/20 to-gray-900 border border-yellow-500/30 p-4 shadow-2xl backdrop-blur-xl pointer-events-auto"
-              >
-                <div className="flex items-center gap-4">
-                  <div className="rounded-full bg-yellow-500/20 p-2 text-yellow-500">
-                    <Award size={24} />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-black uppercase tracking-widest text-yellow-500">¡Medalla Desbloqueada!</h4>
-                    <p className="text-sm font-black text-white uppercase italic">{medalNotification.name}</p>
-                  </div>
-                </div>
-              </motion.div>
-            )}
-            {notifications.map((notif, idx) => (
-              <motion.div
-                key={`notif-v6-${notif.id || 'no-id'}-${idx}`}
-                initial={{ x: 100, opacity: 0 }}
-                animate={{ x: 0, opacity: 1 }}
-                exit={{ x: 100, opacity: 0 }}
-                className={`w-80 rounded-2xl bg-gray-900/95 p-4 border shadow-2xl backdrop-blur-xl pointer-events-auto ${
-                  notif.type === 'rematch_invite' ? 'border-yellow-500/50 shadow-yellow-500/10' : 'border-purple-500/30'
-                }`}
-              >
-                <div className="flex items-start gap-3">
-                  <div className={`rounded-full p-2 ${
-                    notif.type === 'rematch_invite' ? 'bg-yellow-500/20' : 'bg-purple-500/20'
-                  }`}>
-                    <Zap className={notif.type === 'rematch_invite' ? 'text-yellow-400' : 'text-purple-400'} size={20} />
-                  </div>
-                  <div className="flex-1">
-                    <h4 className="text-sm font-black text-white uppercase italic tracking-tighter">
-                      {notif.type === 'rematch_invite' ? '¡Revancha Solicitada!' : '¡Desafío Recibido!'}
-                    </h4>
-                    <p className="text-xs text-gray-400 mt-1">
-                      <span className="font-bold text-white">{notif.fromName}</span> te invita a una {notif.type === 'rematch_invite' ? 'revancha' : 'duelo'} {notif.wager > 0 ? (
-                        <>por <span className={`font-bold ${notif.type === 'rematch_invite' ? 'text-yellow-400' : 'text-yellow-500'}`}>{notif.wager} monedas</span></>
-                      ) : (
-                        <span className="font-bold text-blue-400">Amistoso</span>
-                      )}.
-                    </p>
-                    <div className="mt-4 flex gap-2">
-                      <button 
-                        onClick={async () => {
-                          if (user.monedas < (notif.wager || 0)) {
-                            setProfileMessage({ text: 'No tienes suficientes monedas para aceptar', type: 'error' });
-                            setTimeout(() => setProfileMessage(null), 3000);
-                            return;
-                          }
-                          try {
-                            await updateDoc(doc(db, 'notifications', notif.id), { status: 'accepted' });
-                            if (notif.type === 'rematch_invite') {
-                              onStartWager(notif.wager, notif.growthWager || 10, notif.category);
-                            } else {
-                              onStartWager(notif.wager || 0, 10, `private_${notif.roomId}`);
-                            }
-                          } catch (e) {
-                            console.error('Error accepting invite:', e);
-                          }
-                        }}
-                        className={`flex-1 rounded-lg py-2 text-[10px] font-black uppercase tracking-widest text-white transition-colors ${
-                          notif.type === 'rematch_invite' ? 'bg-yellow-600 hover:bg-yellow-500' : 'bg-purple-600 hover:bg-purple-500'
-                        }`}
-                      >
-                        Aceptar
-                      </button>
-                      <button 
-                        onClick={async () => {
-                          try {
-                            await updateDoc(doc(db, 'notifications', notif.id), { status: 'rejected' });
-                          } catch (e) {
-                            console.error('Error rejecting invite:', e);
-                          }
-                        }}
-                        className="flex-1 rounded-lg bg-gray-800 py-2 text-[10px] font-black uppercase tracking-widest text-gray-400 hover:bg-gray-700"
-                      >
-                        Rechazar
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-        </div>
+        {/* Daily Rewards Modal */}
 
         {/* Daily Rewards Modal */}
         <AnimatePresence>
@@ -4394,7 +3845,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                       
                       return (
                         <button 
-                          key={`reward-day-card-${dayNumber}`}
+                          key={`reward-day-card-v5-${dayNumber}-${idx}`}
                           onClick={() => setSelectedDayForPreview(dayNumber)}
                           className={`relative flex flex-col items-center justify-center rounded-2xl p-4 transition-all border ${
                             isAlreadyClaimed ? 'bg-green-500/10 border-green-500/40 opacity-40 grayscale-[0.8]' :
@@ -4791,21 +4242,42 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                   <div className="space-y-2">
                     <button 
                       onClick={handleCheckUpdate}
-                      disabled={isCheckingUpdate}
-                      className="flex w-full items-center justify-between rounded-2xl bg-blue-600/10 p-4 font-bold border border-blue-500/20 hover:bg-blue-600/20 transition-all disabled:opacity-50"
+                      disabled={isCheckingUpdate || isDownloading}
+                      className={`flex w-full items-center justify-between rounded-2xl p-4 font-bold border transition-all ${isDownloading ? 'bg-blue-600/20 border-blue-500/40' : 'bg-blue-600/10 border-blue-500/20 hover:bg-blue-600/20'} disabled:opacity-80`}
                     >
-                      <div className="flex items-center gap-3">
-                        {isCheckingUpdate ? (
-                          <Loader2 size={20} className="text-blue-400 animate-spin" />
+                      <div className="flex items-center gap-3 w-full">
+                        {isDownloading ? (
+                          <div className="w-full space-y-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <Loader2 size={16} className="text-blue-400 animate-spin" />
+                                <p className="text-[10px] uppercase tracking-widest text-blue-400">Descargando...</p>
+                              </div>
+                              <span className="text-[10px] font-black text-blue-400">{downloadProgress}%</span>
+                            </div>
+                            <div className="h-1.5 w-full bg-blue-950 rounded-full overflow-hidden border border-blue-400/20">
+                              <motion.div 
+                                initial={{ width: 0 }}
+                                animate={{ width: `${downloadProgress}%` }}
+                                className="h-full bg-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.5)]"
+                              />
+                            </div>
+                          </div>
                         ) : (
-                          <Download size={20} className="text-blue-400" />
+                          <>
+                            {isCheckingUpdate ? (
+                              <Loader2 size={20} className="text-blue-400 animate-spin" />
+                            ) : (
+                              <Download size={20} className="text-blue-400" />
+                            )}
+                            <div className="text-left">
+                              <p className="text-[10px] uppercase tracking-widest text-blue-400">Buscar Actualizaciones</p>
+                              <p className="text-[8px] text-gray-400">verificar nueva version disponible.</p>
+                            </div>
+                          </>
                         )}
-                        <div className="text-left">
-                          <p className="text-[10px] uppercase tracking-widest text-blue-400">Buscar Actualizaciones</p>
-                          <p className="text-[8px] text-gray-400">verificar nueva version disponible.</p>
-                        </div>
                       </div>
-                      {!isCheckingUpdate && <Search size={16} className="text-blue-500/50" />}
+                      {!isCheckingUpdate && !isDownloading && <Search size={16} className="text-blue-500/50" />}
                     </button>
                     
                     <AnimatePresence>
@@ -4919,8 +4391,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             </div>
           )}
         </AnimatePresence>
-      </AnimatePresence>
+      </div>
     </div>
-  </div>
   );
 }

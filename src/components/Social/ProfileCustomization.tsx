@@ -133,9 +133,9 @@ export default function ProfileCustomization({ user, onClose, onUpdate }: Profil
               { id: 'themes', label: 'Temas' },
               { id: 'borders', label: 'Bordes' },
               { id: 'bio', label: 'Biografía' }
-            ].map(tab => (
+            ].map((tab, idx) => (
               <button
-                key={tab.id}
+                key={`tab-${tab.id}-${idx}`}
                 onClick={() => setActiveTab(tab.id as any)}
                 className={`pb-4 text-[10px] font-black uppercase tracking-[0.2em] transition-all border-b-2 ${
                   activeTab === tab.id ? 'border-blue-500 text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-300'
@@ -183,9 +183,9 @@ export default function ProfileCustomization({ user, onClose, onUpdate }: Profil
                          placeholder="Ingresa cualquier texto..."
                        />
                     </div>
-                    {AVATAR_STYLES.map(style => (
+                    {AVATAR_STYLES.map((style, idx) => (
                       <button
-                        key={style.id}
+                        key={`avatar-style-${style.id}-${idx}`}
                         onClick={() => setAvatarStyle(style.id)}
                         className={`flex items-center gap-3 rounded-2xl p-3 border transition-all ${
                           avatarStyle === style.id ? 'bg-blue-600 border-blue-400 text-white' : 'bg-white/5 border-white/5 text-gray-400 hover:border-white/20'
@@ -258,12 +258,12 @@ export default function ProfileCustomization({ user, onClose, onUpdate }: Profil
                   exit={{ opacity: 0, y: -10 }}
                   className="grid grid-cols-2 gap-4"
                 >
-                  {THEMES.map(theme => {
+                  {THEMES.map((theme, idx) => {
                     const isUnlocked = user.unlockedThemes?.includes(theme.id);
                     const isEquipped = user.profileTheme === theme.css;
                     return (
                       <button
-                        key={theme.id}
+                        key={`profile-theme-${theme.id}-${idx}`}
                         onClick={() => handleBuyItem(theme, 'theme')}
                         className={`group relative overflow-hidden rounded-[2rem] border p-4 text-left transition-all ${
                           isEquipped ? 'border-blue-500 ring-2 ring-blue-500/20' : 'border-white/5 hover:border-white/20'
@@ -301,12 +301,12 @@ export default function ProfileCustomization({ user, onClose, onUpdate }: Profil
                   exit={{ opacity: 0, y: -10 }}
                   className="grid grid-cols-2 gap-4"
                 >
-                  {BORDERS.map(border => {
+                  {BORDERS.map((border, idx) => {
                     const isUnlocked = user.unlockedBorders?.includes(border.id) || border.price === 0;
                     const isEquipped = user.profileBorder === border.style || (!user.profileBorder && border.id === 'border_simple');
                     return (
                       <button
-                        key={border.id}
+                        key={`profile-border-${border.id}-${idx}`}
                         onClick={() => handleBuyItem(border, 'border')}
                         className={`group relative flex flex-col items-center justify-center rounded-[2rem] border p-6 text-center transition-all ${
                           isEquipped ? 'border-blue-500 bg-blue-600/5' : 'border-white/5 bg-white/5 hover:border-white/20'

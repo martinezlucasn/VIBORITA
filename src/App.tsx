@@ -381,6 +381,8 @@ export default function App() {
     setGameState('ctf');
   };
 
+  const [showCTFModalOnMenu, setShowCTFModalOnMenu] = useState(false);
+
   const handleGameOver = () => {
     if (user?.isGuest) {
       const savedGuest = localStorage.getItem('viborita_guest_data');
@@ -388,6 +390,11 @@ export default function App() {
         setUser(JSON.parse(savedGuest));
       }
     }
+    
+    if (gameState === 'ctf') {
+      setShowCTFModalOnMenu(true);
+    }
+    
     setWager(0);
     setBotCount(1);
     setTrainingWager(0);
@@ -731,6 +738,8 @@ export default function App() {
               onLogout={() => setUser(null)}
               initialRivalId={lastRivalId}
               onRivalHandled={() => setLastRivalId(null)}
+              initialCTFModal={showCTFModalOnMenu}
+              onCTFModalHandled={() => setShowCTFModalOnMenu(false)}
             />
           </motion.div>
         ) : gameState === 'ctf' ? (

@@ -167,22 +167,6 @@
       },
       "required": ["friendshipId", "senderId", "text", "timestamp"]
     },
-    "Notification": {
-      "title": "Notification",
-      "description": "Real-time notifications for game invites",
-      "type": "object",
-      "properties": {
-        "type": { "type": "string", "enum": ["game_invite"] },
-        "fromId": { "type": "string" },
-        "fromName": { "type": "string" },
-        "toId": { "type": "string" },
-        "roomId": { "type": "string" },
-        "wager": { "type": "number" },
-        "status": { "type": "string", "enum": ["pending", "accepted", "rejected"] },
-        "timestamp": { "type": "number" }
-      },
-      "required": ["type", "fromId", "fromName", "toId", "status", "timestamp"]
-    },
     "PrivateRoom": {
       "title": "PrivateRoom",
       "description": "Private game rooms for duels",
@@ -235,6 +219,23 @@
         "updateMessage": { "type": "string" }
       },
       "required": ["version", "minVersion", "downloadUrl"]
+    },
+    "WithdrawalRequest": {
+      "title": "WithdrawalRequest",
+      "description": "User withdrawal request for coins to fiat",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "amount": { "type": "number" },
+        "alias": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "completed", "rejected"] },
+        "timestamp": { "type": "number" },
+        "transactionId": { "type": "string" },
+        "completedAt": { "type": "number" }
+      },
+      "required": ["userId", "displayName", "email", "amount", "alias", "status", "timestamp"]
     },
     "CTFRoom": {
       "title": "CTFRoom",
@@ -293,10 +294,6 @@
       "schema": "PrivateMessage",
       "description": "Messages between friends"
     },
-    "/notifications/{notificationId}": {
-      "schema": "Notification",
-      "description": "User notifications"
-    },
     "/privateRooms/{roomId}": {
       "schema": "PrivateRoom",
       "description": "Private game rooms"
@@ -312,6 +309,10 @@
     "/ctf_rooms/{roomId}": {
       "schema": "CTFRoom",
       "description": "Capture the flag game instances"
+    },
+    "/withdrawals/{withdrawalId}": {
+      "schema": "WithdrawalRequest",
+      "description": "User withdrawal requests"
     }
   }
 }

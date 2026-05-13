@@ -43,7 +43,6 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
   const [isCollecting, setIsCollecting] = useState(false);
   const [finalBalance, setFinalBalance] = useState(0);
   const [competitionStats, setCompetitionStats] = useState<CompetitionStats | null>(null);
-  const [rematchStatus, setRematchStatus] = useState<'none' | 'sending' | 'waiting' | 'accepted' | 'rejected'>('none');
   const [opponentInfo, setOpponentInfo] = useState<{ id: string, name: string } | null>(null);
   const [isBoosting, setIsBoosting] = useState(false);
   const [boostCharge, setBoostCharge] = useState(5.0); // 5 seconds max
@@ -195,45 +194,72 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
   }, [serverId]);
 
   useEffect(() => {
-    const initServer = async () => {
+    const initServer = () => {
       try {
-        // Pass category to findAvailableServer to ensure isolation
-        const id = await findAvailableServer('wagerPlayers', category);
-        if (!id) throw new Error("No server ID returned");
-        setServerId(id);
-        playerRef.current.serverId = id;
-
         // Initialize Socket.io
-        const SERVER_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
-          ? window.location.origin 
-          : 'https://ais-pre-q3rghkaneiw6ol5cicebm3-79875930852.us-east1.run.app';
-          
-        const socket = io(SERVER_URL);
+        const socket = io();
         socketRef.current = socket;
 
         socket.on("connect", () => {
           console.log(`Connected to WebSocket server (Wager - ${category})`);
-          // The serverId is already prefixed by findAvailableServer
           socket.emit("join_arena", {
             id: user.id,
             displayName: user.displayName,
             equippedSkin: user.equippedSkin,
             hasAura: playerRef.current.hasAura,
             auraType: playerRef.current.auraType,
-            serverId: id,
+            serverId: null,
             wager: playerRef.current.wager,
             category: category,
             mode: 'wager'
           });
         });
 
+        socket.on("joined_room", ({ roomId, players }) => {
+          console.log(`Joined WebSocket room: ${roomId}`);
+          setServerId(roomId);
+          playerRef.current.serverId = roomId;
+          if (players) {
+            players.forEach((p: any) => {
+              const playerId = p.userId || p.id;
+              if (playerId !== user.id) {
+                otherPlayersRef.current[playerId] = {
+                  ...otherPlayersRef.current[playerId],
+                  ...p,
+                  lastUpdate: Date.now()
+                };
+              }
+            });
+          }
+        });
+
         socket.on("player_moved", (data) => {
-          if (data.id !== user.id) {
-            otherPlayersRef.current[data.id] = {
+          // Use userId for matching if it exists, otherwise use id (socket id)
+          const playerId = data.userId || data.id;
+          if (playerId !== user.id) {
+            otherPlayersRef.current[playerId] = {
+              ...otherPlayersRef.current[playerId],
               ...data,
               lastUpdate: Date.now()
             };
           }
+        });
+
+        socket.on("player_joined", (data) => {
+          const playerId = data.userId || data.id;
+          if (playerId !== user.id) {
+            otherPlayersRef.current[playerId] = {
+              ...otherPlayersRef.current[playerId],
+              ...data,
+              lastUpdate: Date.now()
+            };
+          }
+        });
+
+        socket.on("player_left", ({ id, userId }) => {
+          const playerId = userId || id;
+          delete otherPlayersRef.current[playerId];
+          delete interpolatedPlayersRef.current[playerId];
         });
 
         socket.on("server_death", ({ killerName }) => {
@@ -242,8 +268,9 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
           handleDeath(killerId);
         });
 
-        socket.on("player_died", async ({ id, wager: victimWager, segments: victimSegments, killerName }) => {
-          if (id !== user.id) {
+        socket.on("player_died", async ({ id, userId, wager: victimWager, segments: victimSegments, killerName }) => {
+          const playerId = userId || id;
+          if (playerId !== user.id) {
             // If in private room, the remaining player is ALWAYS the winner if the other dies
             if (category.startsWith('private_')) {
                // Identify opponent if not already done
@@ -258,11 +285,11 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
               if (killerName === user.displayName && victimWager && victimSegments) {
                 // We DON'T call dropWagerCoins here anymore because the VICTIM calls it in their handleDeath
                 // This prevents double dropping of coins.
-                updateCompetitionStats(true, victimWager, id);
+                updateCompetitionStats(true, victimWager, playerId);
               }
             }
-            delete otherPlayersRef.current[id];
-            delete interpolatedPlayersRef.current[id];
+            delete otherPlayersRef.current[playerId];
+            delete interpolatedPlayersRef.current[playerId];
           }
         });
       } catch (err) {
@@ -856,60 +883,6 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
     // Handle game over delay based on rematch
     if (!category.startsWith('private_')) {
       setTimeout(onGameOver, 3000);
-    }
-  };
-
-  const handleRematchRequest = async () => {
-    if (!opponentInfo || rematchStatus !== 'none') return;
-    
-    setRematchStatus('sending');
-    try {
-      // Create a notification for the opponent
-      await addDoc(collection(db, 'notifications'), {
-        type: 'rematch_invite',
-        fromId: user.id,
-        fromName: user.displayName,
-        toId: opponentInfo.id,
-        wager,
-        growthWager,
-        category,
-        status: 'pending',
-        timestamp: Date.now()
-      });
-      
-      setRematchStatus('waiting');
-      
-      // Listen for the rematch result
-      const q = query(
-        collection(db, 'notifications'), 
-        where('type', '==', 'rematch_invite'),
-        where('fromId', '==', user.id),
-        where('toId', '==', opponentInfo.id),
-        where('status', 'in', ['accepted', 'rejected']),
-        orderBy('timestamp', 'desc'),
-        limit(1)
-      );
-      
-      const unsubscribe = onSnapshot(q, (snapshot) => {
-        if (!snapshot.empty) {
-          const notif = snapshot.docs[0].data();
-          if (notif.status === 'accepted') {
-            setRematchStatus('accepted');
-            // Re-initialize game with same settings
-            onStartWager(wager, growthWager, category);
-          } else if (notif.status === 'rejected') {
-            setRematchStatus('rejected');
-            // Back to menu after 2 seconds
-            setTimeout(() => {
-              onGameOver();
-            }, 2000);
-          }
-          unsubscribe();
-        }
-      });
-    } catch (e) {
-      console.error("Error requesting rematch:", e);
-      setRematchStatus('none');
     }
   };
 
@@ -2254,34 +2227,6 @@ export default function WagerArena({ user, wager, growthWager, category, onGameO
                 </div>
 
                 <div className="flex flex-col gap-3">
-                  {rematchStatus === 'none' && (
-                    <button
-                      onClick={handleRematchRequest}
-                      disabled={user.monedas < wager}
-                      className="w-full rounded-2xl bg-yellow-500 py-4 text-xl font-black uppercase tracking-tighter text-black transition-all hover:scale-105 active:scale-95 disabled:opacity-50 disabled:grayscale shadow-lg shadow-yellow-500/20"
-                    >
-                      {user.monedas < wager ? 'Saldo Insuficiente' : 'Pedir Revancha'}
-                    </button>
-                  )}
-                  
-                  {rematchStatus === 'sending' && (
-                    <div className="w-full rounded-2xl bg-white/10 py-4 text-lg font-black uppercase tracking-tighter text-white animate-pulse border border-white/10">
-                      Enviando...
-                    </div>
-                  )}
-                  
-                  {rematchStatus === 'waiting' && (
-                    <div className="w-full rounded-2xl bg-blue-500/20 py-4 text-lg font-black uppercase tracking-tighter text-blue-400 border border-blue-500/30">
-                      Esperando respuesta...
-                    </div>
-                  )}
-                  
-                  {rematchStatus === 'rejected' && (
-                    <div className="w-full rounded-2xl bg-red-500/20 py-4 text-lg font-black uppercase tracking-tighter text-red-500 border border-red-500/30">
-                      Revancha Rechazada
-                    </div>
-                  )}
-
                   <button
                     onClick={() => {
                       if (opponentInfo?.id && onReturnToRival) {

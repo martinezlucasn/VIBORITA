@@ -4,7 +4,6 @@ import { Server } from "socket.io";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
-import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 import dotenv from 'dotenv';
 import admin from 'firebase-admin';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
@@ -30,6 +29,21 @@ console.log(`Supabase client initialized. URL: ${!!supabaseUrl}, Key: ${!!supaba
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const rooms = new Map<string, any>();
+const userSockets = new Map<string, string>(); // userId -> socketId
+
+const WORLD_W = 3000;
+const WORLD_H = 3000;
+
+function initCTFFlags() {
+  return [
+    { x: 100, y: 100, carrierId: null, ownerCorner: 0, active: false },
+    { x: WORLD_W - 100, y: 100, carrierId: null, ownerCorner: 1, active: false },
+    { x: 100, y: WORLD_H - 100, carrierId: null, ownerCorner: 2, active: false },
+    { x: WORLD_W - 100, y: WORLD_H - 100, carrierId: null, ownerCorner: 3, active: false }
+  ];
+}
 
 async function startServer() {
   const app = express();
@@ -69,27 +83,7 @@ async function startServer() {
     isBoosting?: boolean;
   }
 
-  const rooms = new Map<string, { 
-    players: Map<string, Player>; 
-    bots: Player[]; 
-    mode?: 'points' | 'wager' | 'ctf';
-    flags?: { x: number; y: number; carrierId: string | null; ownerCorner: number; active: boolean }[];
-    status?: 'waiting' | 'playing' | 'finished';
-    wager?: number;
-  }>();
-
-  function initCTFFlags() {
-    return [
-      { x: 100, y: 100, carrierId: null, ownerCorner: 0, active: false },
-      { x: WORLD_W - 100, y: 100, carrierId: null, ownerCorner: 1, active: false },
-      { x: 100, y: WORLD_H - 100, carrierId: null, ownerCorner: 2, active: false },
-      { x: WORLD_W - 100, y: WORLD_H - 100, carrierId: null, ownerCorner: 3, active: false }
-    ];
-  }
-  const userSockets = new Map<string, string>(); // userId -> socketId
   const CELL = 24;
-  const WORLD_W = 3000;
-  const WORLD_H = 3000;
 
   const CORNERS = [
     { x: 100, y: 100, name: 'Rojo' },
@@ -99,507 +93,7 @@ async function startServer() {
   ];
   const COLORS = ['#ef4444', '#10b981', '#3b82f6', '#f8fafc']; // Red, Green, Blue, White
 
-  // Mercado Pago Configuration
-  const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || 'APP_USR-8338032777407473-041219-60a8de4c25c2273f599e7f4c30d48437-148608155';
-  const client = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
-
-  // 🛡️ Firestore Bridge: Listen for payments from external Google Cloud services
-  function setupFirestoreBridge() {
-    console.log("[BRIDGE] 🚀 Iniciando Puente Infalible de Pagos...");
-    const paymentsRef = db.collection('payment_notifications');
-    
-    // Escuchamos todas las notificaciones recientes
-    paymentsRef.orderBy('received_at', 'desc').limit(50).onSnapshot(async (snapshot) => {
-      if (snapshot.empty) return;
-      
-      const pendingDocs = snapshot.docs.filter(d => d.data().processed === false);
-      if (pendingDocs.length === 0) return;
-
-      console.log(`[BRIDGE] 📥 Procesando ${pendingDocs.length} notificaciones pendientes.`);
-      
-      for (const doc of pendingDocs) {
-        const data = doc.data();
-        const notificationId = doc.id;
-        const mpPaymentId = data.payment_id || data.id;
-
-        if (!mpPaymentId) continue;
-
-        try {
-          console.log(`[BRIDGE] 🔍 Validando con Mercado Pago ID: ${mpPaymentId}`);
-          const payment = new Payment(client);
-          const paymentData = await payment.get({ id: String(mpPaymentId) });
-          
-          if (paymentData.status === 'approved') {
-            console.log(`[BRIDGE] ✅ Pago aprobado. Iniciando acreditación para ${data.user_id}`);
-            const success = await processPaymentUpdate(String(mpPaymentId), paymentData);
-            
-            await doc.ref.update({ 
-              processed: true, 
-              success: success, 
-              processedAt: FieldValue.serverTimestamp(),
-              status: 'approved'
-            });
-            console.log(`[BRIDGE] ✨ Listo. El panel debería mostrar "SI" ahora.`);
-          } else {
-            console.log(`[BRIDGE] ℹ️ Pago ${mpPaymentId} en estado ${paymentData.status}.`);
-          }
-        } catch (err: any) {
-          console.error(`[BRIDGE] ❌ Error verificando pago ${mpPaymentId}:`, err.message);
-          if (err.message?.includes('not found')) {
-             await doc.ref.update({ processed: true, error: "Not found in MP" });
-          }
-        }
-      }
-    }, (err) => {
-      console.error("[BRIDGE] Error en el Listener de Firestore:", err);
-    });
-  }
-
-  // Only setup bridge if configured
-  if (client) {
-    setupFirestoreBridge();
-  }
-
   // API Routes
-  app.post("/api/create-preference", async (req, res) => {
-    if (!client) {
-      return res.status(500).json({ error: "Mercado Pago no está configurado" });
-    }
-
-    const { amount, userId, email, type, pointsAmount, price } = req.body;
-
-    if (!email) {
-      return res.status(400).json({ error: "El email del usuario es requerido para procesar el pago" });
-    }
-
-    try {
-      const preference = new Preference(client);
-      
-      // Ensure notification_url is only set if we have a valid public host
-      const host = req.headers.host;
-      const xForwardedHost = req.headers['x-forwarded-host'] as string;
-      const actualHost = xForwardedHost || host;
-      const isLocal = actualHost?.includes('localhost') || actualHost?.includes('127.0.0.1');
-      
-      // Use the canonical bridge URL for payment notifications
-      const notificationUrl = "https://puente-viborita-955968394030.us-central1.run.app/api/webhook";
-
-      console.log(`Creating preference for user ${userId}, amount ${amount}, webhook: ${notificationUrl}`);
-
-      const result = await preference.create({
-        body: {
-          items: [
-            {
-              id: type === 'points' ? `points-${pointsAmount}` : `coins-${amount}`,
-              title: type === 'points' ? `Carga de ${pointsAmount} Puntos - Viborita` : `Carga de ${amount} Monedas - Viborita`,
-              quantity: 1,
-              unit_price: Number(price || amount),
-              currency_id: 'ARS'
-            }
-          ],
-          payer: {
-            email: email
-          },
-          metadata: {
-            user_id: userId,
-            coins_amount: amount,
-            purchase_type: type || 'monedas',
-            points_to_add: pointsAmount || 0
-          },
-          back_urls: {
-            success: `${req.headers.origin}/?payment=success`,
-            failure: `${req.headers.origin}/?payment=failure`,
-            pending: `${req.headers.origin}/?payment=pending`
-          },
-          auto_return: 'approved',
-          notification_url: notificationUrl,
-          external_reference: userId // Useful for tracking
-        }
-      });
-
-      res.json({ id: result.id, init_point: result.init_point });
-    } catch (error: any) {
-      console.error("Error creating Mercado Pago preference:", error);
-      const errorMessage = error.message || "Error al crear la preferencia de pago";
-      res.status(500).json({ error: errorMessage });
-    }
-  });
-
-  // Helper to process payments (approved or pending)
-  async function processPaymentUpdate(paymentId: string, data: any) {
-    const status = data.status;
-    console.log(`[PAYMENT_PROCESSOR] Examining payment ${paymentId}. Status: ${status}`);
-    
-    if (status !== 'approved' && status !== 'pending') {
-      console.log(`[PAYMENT_PROCESSOR] Payment ${paymentId} status (${status}) not eligible for processing in this handler. Skipping.`);
-      return false;
-    }
-
-    // Mercado Pago can send metadata in different places
-    const metadata = data.metadata || {};
-    
-    // Fallback chain for userId: metadata -> external_reference
-    const userId = metadata.user_id || metadata.userId || data.external_reference;
-    
-    // Fallback chain for amount: metadata.coins_amount -> transaction_amount
-    let amount = Number(metadata.coins_amount || metadata.amount || 0);
-    if (amount <= 0) {
-      amount = Number(data.transaction_amount || 0);
-      console.log(`[PAYMENT_PROCESSOR] Usando fallback de monto: ${amount}`);
-    }
-
-    const purchaseType = metadata.purchase_type || 'monedas';
-    const pointsToAdd = Number(metadata.points_to_add || 0);
-
-    console.log(`[PAYMENT_PROCESSOR] 📊 Información extraída:
-      - ID Pago: ${paymentId}
-      - ID Usuario: ${userId}
-      - Monto: ${amount}
-      - Tipo: ${purchaseType}
-      - Status: ${status}
-    `);
-
-    if (!userId) {
-      console.error("[PAYMENT_PROCESSOR] ❌ ERROR: No userId found in payment data. Cannot process.");
-      return false;
-    }
-    
-    if (amount <= 0) {
-      console.warn("[PAYMENT_PROCESSOR] ⚠️ ADVERTENCIA: El monto es 0 o menor.");
-    }
-    
-    // 1. Check if this payment was already processed as approved to prevent double crediting
-    const paymentRef = db.collection('processed_payments').doc(paymentId);
-    const paymentDoc = await paymentRef.get();
-
-    if (paymentDoc.exists && paymentDoc.data()?.status === 'approved') {
-      console.log(`Payment ${paymentId} already approved and credited. Skipping.`);
-      return true;
-    }
-
-    // Notify user via Socket.IO if they are online
-    const userSocketId = userSockets.get(userId);
-    if (userSocketId) {
-      console.log(`[PAYMENT_PROCESSOR] Notifying user ${userId} via socket ${userSocketId} about status ${status}`);
-      io.to(userSocketId).emit("payment_status_update", {
-        id: paymentId,
-        status: status,
-        amount: amount,
-        purchaseType: purchaseType
-      });
-    }
-
-    if (status === 'pending') {
-      console.log(`[PAYMENT_PROCESSOR] Recording payment ${paymentId} as pending in Firestore and Supabase.`);
-      await paymentRef.set({
-        userId,
-        amount,
-        purchaseType,
-        pointsAdded: purchaseType === 'points' ? pointsToAdd : (amount === 100000 ? 50000 : 0),
-        timestamp: FieldValue.serverTimestamp(),
-        status: 'pending',
-        mercadoPagoData: {
-          id: data.id,
-          status: data.status,
-          status_detail: data.status_detail,
-          external_reference: data.external_reference
-        }
-      }, { merge: true });
-
-      // Record as pending transaction in Supabase
-      try {
-        await supabase.from('transactions').insert({
-          user_id: userId,
-          type: 'pending',
-          currency: purchaseType === 'points' ? 'coins' : 'monedas',
-          amount: purchaseType === 'points' ? pointsToAdd : amount,
-          reason: `mercado_pago_pending: ${paymentId}`,
-          timestamp: new Date().toISOString()
-        });
-      } catch (err) {
-        console.error("Error logging pending transaction to Supabase:", err);
-      }
-
-      return true;
-    }
-
-    // From here on, it's 'approved'
-    console.log(`[PAYMENT_PROCESSOR] Proceeding to credit balance for approved payment ${paymentId}`);
-
-    // 2. Update Firestore User
-    const userRef = db.collection('users').doc(userId);
-    
-    try {
-      await db.runTransaction(async (transaction) => {
-        const userDoc = await transaction.get(userRef);
-        
-        const currentMonedas = userDoc.exists ? (userDoc.data()?.monedas || 0) : 0;
-        const currentCoins = userDoc.exists ? (userDoc.data()?.coins || 0) : 0;
-        
-        const updates: any = {};
-
-        if (purchaseType === 'points') {
-          updates.coins = currentCoins + pointsToAdd;
-        } else {
-          updates.monedas = currentMonedas + amount;
-          // If it's the 100k package, add the 50k points bonus
-          if (amount === 100000) {
-            updates.coins = currentCoins + 50000;
-          }
-        }
-
-        if (userDoc.exists) {
-          transaction.update(userRef, updates);
-        } else {
-          transaction.set(userRef, {
-            monedas: updates.monedas || 0,
-            coins: updates.coins || 0,
-            displayName: 'Player',
-            email: data.payer?.email || '',
-            lastActive: Date.now(),
-            ownedSkins: ['default'],
-            equippedSkin: 'default',
-            highScore: 0,
-            highScoreMonedas: 0
-          }, { merge: true });
-        }
-
-        transaction.set(paymentRef, {
-          userId,
-          amount,
-          purchaseType,
-          pointsAdded: purchaseType === 'points' ? pointsToAdd : (amount === 100000 ? 50000 : 0),
-          timestamp: FieldValue.serverTimestamp(),
-          status: 'approved',
-          mercadoPagoData: {
-            id: data.id,
-            status: data.status,
-            status_detail: data.status_detail,
-            external_reference: data.external_reference
-          }
-        }, { merge: true });
-      });
-    } catch (transactionError) {
-      console.error("Transaction failed:", transactionError);
-      throw transactionError;
-    }
-
-    // 3. Update Supabase Profile
-    try {
-      const { data: profile, error: profileError } = await supabase
-        .from('profiles')
-        .select('monedas, coins')
-        .eq('id', userId)
-        .maybeSingle();
-
-      if (profileError) {
-        console.error(`[PAYMENT_PROCESSOR] ❌ Error al buscar perfil en Supabase para ${userId}:`, profileError);
-      } else if (profile) {
-        console.log(`[PAYMENT_PROCESSOR] 👤 Usuario encontrado:`, profile);
-        const updates: any = {};
-        if (purchaseType === 'points') {
-          updates.coins = (profile.coins || 0) + pointsToAdd;
-        } else {
-          updates.monedas = (profile.monedas || 0) + amount;
-          if (amount === 100000) {
-            updates.coins = (profile.coins || 0) + 50000;
-          }
-        }
-
-        const { error: updateError } = await supabase
-          .from('profiles')
-          .update(updates)
-          .eq('id', userId);
-        
-        if (updateError) {
-          console.error("[PAYMENT_PROCESSOR] ❌ Error al actualizar saldo en Supabase:", updateError);
-        } else {
-          console.log(`[PAYMENT_PROCESSOR] ✅ Saldo actualizado correctamente en Supabase para ${userId}`);
-        }
-      } else {
-        console.warn(`[PAYMENT_PROCESSOR] ⚠️ No se encontró ningún perfil en Supabase con el ID: ${userId}`);
-      }
-    } catch (supabaseErr) {
-      console.error("Supabase operation failed:", supabaseErr);
-    }
-
-    // 4. Log Transaction in Supabase
-    try {
-      await supabase.from('transactions').insert({
-        user_id: userId,
-        type: 'received',
-        currency: purchaseType === 'points' ? 'coins' : 'monedas',
-        amount: purchaseType === 'points' ? pointsToAdd : amount,
-        reason: `mercado_pago_purchase: ${paymentId}`,
-        timestamp: new Date().toISOString()
-      });
-
-      if (purchaseType === 'monedas' && amount === 100000) {
-        await supabase.from('transactions').insert({
-          user_id: userId,
-          type: 'received',
-          currency: 'coins',
-          amount: 50000,
-          reason: `mercado_pago_bonus: ${paymentId}`,
-          timestamp: new Date().toISOString()
-        });
-      }
-    } catch (logErr) {
-      console.error("Error logging transaction to Supabase:", logErr);
-    }
-
-    console.log(`Successfully credited ${amount} ${purchaseType} to user ${userId}`);
-    return true;
-  }
-
-  app.post("/api/webhook", async (req, res) => {
-    const { query, body } = req;
-    
-    // Mercado Pago sends topic/id in different places depending on the version
-    // Topic can be in type, topic, action, or body.type
-    let topic = query.topic || query.type || body.type || body.action;
-    // ID can be in data.id, id, resource (as a URL), etc.
-    let id = query.id || body.data?.id || body.id;
-
-    // Handle 'resource' pattern (e.g., https://api.mercadopago.com/v1/payments/123)
-    if (!id && body.resource) {
-      const parts = body.resource.split('/');
-      id = parts[parts.length - 1];
-    }
-
-    console.log(`[WEBHOOK] Incoming: topic=${topic}, id=${id}, action=${body.action}, type=${body.type}`);
-    
-    // Respond IMMEDIATELY to Mercado Pago to avoid 502/504 timeouts
-    res.sendStatus(200);
-
-    if (!id) {
-      console.warn("[WEBHOOK] Received notification without a detectable ID. Skipping background process.");
-      return;
-    }
-
-    // Process the rest in the background
-    (async () => {
-      const paymentId = String(id);
-      console.log(`[WEBHOOK_BG] Starting background process for ${paymentId} (Topic: ${topic})`);
-
-      // Log to Firestore for debugging
-      let logRef = null;
-      try {
-        logRef = await db.collection('webhook_logs').add({
-          topic: topic || 'unknown',
-          id: paymentId,
-          query,
-          body,
-          processed: false,
-          timestamp: FieldValue.serverTimestamp()
-        });
-      } catch (e) {
-        console.error("[WEBHOOK_BG] Firestore log failed:", e);
-      }
-
-      // Also log to Supabase for redundancy
-      try {
-        await supabase.from('webhook_logs').insert({
-          topic: String(topic || 'unknown'),
-          external_id: String(id || 'unknown'),
-          payload: { query, body },
-          timestamp: new Date().toISOString()
-        });
-      } catch (supabaseErr) {
-        console.warn("Supabase webhook logging skipped:", supabaseErr);
-      }
-
-      const isPaymentEvent = topic === 'payment' || 
-                            topic === 'payment.updated' || 
-                            topic === 'payment.created' ||
-                            (typeof topic === 'string' && topic.includes('payment'));
-
-      if (isPaymentEvent && id) {
-        const paymentId = String(id);
-        
-        try {
-          if (!client) {
-            throw new Error("MercadoPago client is NOT initialized. Please set MP_ACCESS_TOKEN in Settings.");
-          }
-
-          const payment = new Payment(client);
-          console.log(`[WEBHOOK_BG] Fetching payment ${paymentId} from MP API...`);
-          
-          // Fetch full payment details from Mercado Pago API
-          const data = await payment.get({ id: paymentId });
-          console.log(`[WEBHOOK_BG] MP API Response status: ${data.status}`);
-          
-          if (data.status === 'approved' || data.status === 'pending') {
-            const success = await processPaymentUpdate(paymentId, data);
-            
-            // Mark as processed in Firestore logs
-            if (logRef) {
-              await logRef.update({ 
-                processed: true, 
-                approved: data.status === 'approved', 
-                status: data.status,
-                success: success,
-                processedAt: FieldValue.serverTimestamp()
-              });
-            }
-          } else {
-            console.log(`[WEBHOOK_BG] Payment ${paymentId} not approved yet. Current status: ${data.status}`);
-            if (logRef) {
-              await logRef.update({ 
-                processed: true, 
-                approved: false, 
-                status: data.status,
-                processedAt: FieldValue.serverTimestamp()
-              });
-            }
-          }
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          console.error(`[WEBHOOK_BG] Error processing background webhook payment ${paymentId}:`, error);
-          if (logRef) {
-            await logRef.update({ 
-              processed: true, 
-              error: errorMessage,
-              processedAt: FieldValue.serverTimestamp()
-            });
-          }
-        }
-      }
-    })();
-  });
-
-  app.get("/api/check-payment/:paymentId", async (req, res) => {
-    const { paymentId } = req.params;
-    
-    if (!client || !paymentId) {
-      return res.status(400).json({ error: "Missing parameters" });
-    }
-
-    try {
-      const payment = new Payment(client);
-      const data = await payment.get({ id: paymentId });
-      
-      if (data.status === 'approved' || data.status === 'pending') {
-        const success = await processPaymentUpdate(paymentId, data);
-        const metadata = data.metadata || {};
-        return res.json({ 
-          success, 
-          status: data.status, 
-          already_processed: data.status === 'approved' && !success,
-          amount: metadata.coins_amount || data.transaction_amount,
-          type: metadata.purchase_type || 'monedas',
-          userId: metadata.user_id,
-          email: metadata.email || (data.payer ? data.payer.email : undefined)
-        });
-      }
-      
-      return res.json({ success: false, status: data.status });
-    } catch (error: any) {
-      console.error("Error checking payment:", error);
-      res.status(500).json({ error: error.message });
-    }
-  });
-
   function createServerBot(roomId: string, id: string): Player {
     const botNames = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Ghost", "Hunter"];
     const name = botNames[Math.floor(Math.random() * botNames.length)];
@@ -797,14 +291,19 @@ async function startServer() {
       }
     }, 50);
 
-  function getAvailableRoom() {
+  function getAvailableRoom(mode: string = 'points') {
+    // For global arenas, use a shared common room ID first
+    if (mode === 'points') return 'global_arena_points';
+    if (mode === 'wager') return 'global_arena_wager';
+    if (mode === 'ctf') return 'global_arena_ctf';
+    
     for (const [roomId, room] of rooms.entries()) {
-      if (room.players.size < MAX_PLAYERS_PER_ROOM) {
+      if (room.mode === mode && room.players.size < MAX_PLAYERS_PER_ROOM) {
         return roomId;
       }
     }
-    const newRoomId = `room_${Date.now()}`;
-    rooms.set(newRoomId, { players: new Map(), bots: [] });
+    const newRoomId = `room_${mode}_${Date.now()}`;
+    rooms.set(newRoomId, { players: new Map(), bots: [], mode });
     return newRoomId;
   }
 
@@ -813,39 +312,29 @@ async function startServer() {
 
     socket.on("join_arena", async (userData) => {
       let roomId = userData.serverId;
+      const mode = userData.mode || 'points';
       
-      // Auto-assign CTF room if none provided
-      if (!roomId && userData.mode === 'ctf') {
-        for (const [rId, r] of rooms.entries()) {
-          if (r.mode === 'ctf' && r.wager === userData.wager && r.players.size < 4 && r.status === 'waiting') {
-            roomId = rId;
-            break;
+      // FORCE global rooms for points and wager if no specific private room is requested
+      if (!roomId || roomId === 'undefined' || roomId === 'null') {
+        const targetWager = Number(userData.wager || 0);
+        if (mode === 'points') {
+          roomId = 'global_arena_points';
+        } else if (mode === 'wager') {
+          // Separar arenas de apuestas por monto para evitar mezclas
+          roomId = `global_arena_wager_${targetWager}`;
+        } else if (mode === 'ctf') {
+          // CTF Matchmaking determinístico
+          for (let i = 1; i <= 100; i++) {
+            const checkId = `ctf_${targetWager}_room_${i}`;
+            const r = rooms.get(checkId);
+            if (!r || (r.players.size < 4)) {
+              roomId = checkId;
+              break;
+            }
           }
+        } else {
+          roomId = getAvailableRoom(mode);
         }
-        
-        if (!roomId) {
-          roomId = `ctf_${Math.random().toString(36).substring(2, 10)}`;
-          const newRoom: any = {
-            id: roomId,
-            players: new Map(),
-            bots: [],
-            mode: 'ctf',
-            status: 'waiting',
-            wager: userData.wager || 0,
-            flags: initCTFFlags(),
-            createdAt: Date.now()
-          };
-          rooms.set(roomId, newRoom);
-          
-          // Basic persistence for room discovery
-          db.collection('ctf_rooms').doc(roomId).set({
-            betAmount: userData.wager || 0,
-            status: 'waiting',
-            createdAt: FieldValue.serverTimestamp()
-          }).catch(() => {});
-        }
-      } else if (!roomId) {
-        roomId = getAvailableRoom();
       }
 
       let room = rooms.get(roomId);
@@ -855,38 +344,56 @@ async function startServer() {
           bots: [], 
           mode: userData.mode || 'points',
           status: 'waiting',
-          wager: userData.wager || 0
+          wager: userData.wager || 0,
+          createdAt: Date.now()
         };
         if (userData.mode === 'ctf') {
           room.flags = initCTFFlags();
         }
         rooms.set(roomId, room);
+      } else if (room.mode === 'ctf' && room.players.size >= 4 && !room.players.has(socket.id)) {
+        // Room is full
+        socket.emit("room_full", { error: "Esta arena ya está llena (máximo 4 jugadores)." });
+        return;
       }
       
       if (userData.id) {
         userSockets.set(userData.id, socket.id);
         (socket as any).userId = userData.id;
       }
+      (socket as any).roomId = roomId;
 
       // Corner assignment for CTF
       let cornerIndex = -1;
       if (room.mode === 'ctf') {
         const occupied = Array.from(room.players.values()).map((p: any) => p.corner);
-        const order = [0, 3, 2, 1]; // Rojo, Blanco, Azul, Verde
+        const order = [0, 3, 2, 1]; // Rojo (0), Blanco (3), Azul (2), Verde (1)
         for (const i of order) {
           if (!occupied.includes(i)) {
             cornerIndex = i;
             break;
           }
         }
+        
+        // Activate flag for this corner
+        if (cornerIndex !== -1 && room.flags) {
+          room.flags[cornerIndex].active = true;
+          io.to(roomId).emit("ctf_flag_update", { flags: room.flags });
+        }
       }
       
+      const SEGMENT_DISTANCE = 15;
+      const initialSegments = cornerIndex !== -1 ? Array.from({ length: 15 }, (_, i) => ({ 
+        x: CORNERS[cornerIndex].x + (cornerIndex % 2 === 0 ? 1 : -1) * i * SEGMENT_DISTANCE, 
+        y: CORNERS[cornerIndex].y 
+      })) : [];
+
       const newPlayer: Player = {
         id: socket.id,
         userId: userData.id,
         roomId,
         displayName: userData.displayName || "Invitado",
-        segments: [],
+        segments: room.mode === 'ctf' ? initialSegments : [],
         isAlive: true,
         spawnTime: Date.now(),
         angle: 0,
@@ -924,12 +431,8 @@ async function startServer() {
       }
       
       io.to(roomId).emit("player_joined", { 
-        id: socket.id, 
-        displayName: newPlayer.displayName,
-        playersCount: room.players.size,
-        corner: newPlayer.corner,
-        color1: newPlayer.color1,
-        skinEmoji: newPlayer.skinEmoji
+        ...newPlayer,
+        playersCount: room.players.size
       });
 
       socket.emit("joined_room", { 
@@ -937,20 +440,36 @@ async function startServer() {
         playersCount: room.players.size,
         flags: room.flags,
         corner: newPlayer.corner,
-        status: room.status
+        status: room.status,
+        players: Array.from(room.players.entries())
+          .filter(([id]) => id !== socket.id)
+          .map(([_, p]) => p)
       });
     });
 
+    socket.on("start_ctf_early", () => {
+      const roomId = (socket as any).roomId;
+      const room = rooms.get(roomId);
+      if (room && room.mode === 'ctf') {
+        if (room.status === 'waiting') {
+          room.status = 'playing';
+          io.to(roomId).emit("ctf_game_start", { status: 'playing' });
+          
+          // Update persistence
+          db.collection('ctf_rooms').doc(roomId).update({
+            status: 'playing'
+          }).catch(() => {});
+        }
+      }
+    });
+
     socket.on("update_position", (data) => {
-      const roomEntry = Array.from(rooms.values()).find(r => r.players.has(socket.id));
-      if (!roomEntry) return;
-      const player = roomEntry.players.get(socket.id);
-      if (!player || !player.isAlive || player.isEliminated) return;
-      
-      const roomId = player.roomId;
+      const roomId = (socket as any).roomId;
       const room = rooms.get(roomId);
       if (!room) return;
-
+      const player = room.players.get(socket.id);
+      if (!player || !player.isAlive || player.isEliminated) return;
+      
       // Update basic state
       player.segments = data.segments || [];
       player.angle = data.angle;
@@ -998,6 +517,7 @@ async function startServer() {
               socket.emit("server_death", { killerName: other.displayName });
               io.to(roomId).emit("player_died", { 
                 id: socket.id, 
+                userId: player.userId,
                 killerName: other.displayName,
                 wager: player.wager,
                 segments: player.segments
@@ -1023,6 +543,7 @@ async function startServer() {
       // Broadcast position to others
       socket.to(roomId).emit("player_moved", {
         id: socket.id,
+        userId: player.userId,
         hasAura: player.hasAura,
         auraType: player.auraType,
         ...data
@@ -1038,7 +559,7 @@ async function startServer() {
       const flag = room.flags[flagIndex];
       
       // NEW: Check if the flag owner is in the room and not eliminated
-      const ownerExists = Array.from(room.players.values()).some(p => p.corner === flag.ownerCorner && !p.isEliminated);
+      const ownerExists = Array.from(room.players.values()).some((p: any) => p.corner === flag.ownerCorner && !p.isEliminated);
       if (!ownerExists) {
         console.log(`[CTF] Flag ${flagIndex} pickup denied: owner not in arena.`);
         return;
@@ -1061,47 +582,52 @@ async function startServer() {
       const flagOwnerCorner = flag.ownerCorner;
       
       // Find the player who owns this flag to eliminate them
-      const victimEntry = Array.from(room.players.entries()).find(([_, p]) => p.corner === flagOwnerCorner);
+      const victimEntry = Array.from(room.players.entries()).find(([_, p]) => (p as any).corner === flagOwnerCorner);
+      const wagerToSteal = room.wager || 0;
+
       if (victimEntry) {
-        const [vSocketId, vPlayer] = victimEntry;
-        vPlayer.isEliminated = true;
+        const [vSocketId, vPlayer] = victimEntry as [string, any];
         
-        // Deactivate flag
-        flag.active = false;
+        // Inform the victim they were defeated
+        io.to(vSocketId).emit("ctf_defeated", { 
+          message: "¡Tu bandera ha sido capturada! Has perdido tu apuesta.",
+          wagerLost: wagerToSteal
+        });
+
+        // Remove victim from room
+        room.players.delete(vSocketId);
         
+        // Log the elimination
         io.to(player.roomId).emit("ctf_player_eliminated", { id: vPlayer.userId, socketId: vSocketId });
         
-        // Update Firestore
+        // Update Firestore if needed (optional since players are being cleaned up)
         db.collection('ctf_rooms').doc(player.roomId).update({
           [`players.${vPlayer.userId}.isEliminated`]: true
-        }).catch((e) => {
-          console.error(`Error updating ctf_room ${player.roomId}:`, e);
-        });
+        }).catch(() => {});
       }
 
-      // Reset flag
+      // Reset flag to base
       flag.carrierId = null;
       flag.x = CORNERS[flag.ownerCorner].x;
       flag.y = CORNERS[flag.ownerCorner].y;
+      flag.active = false; // Flag is inactive until a new player joins this corner
       player.hasFlag = null;
 
       io.to(player.roomId).emit("ctf_flag_update", { flags: room.flags });
       io.to(player.roomId).emit("ctf_score", { 
         scorerId: player.userId, 
         flagOwnerCorner: flag.ownerCorner,
-        reward: room.wager || 0 
+        reward: wagerToSteal 
       });
 
+      // Transfer money
       if (player.userId) {
         try {
           await db.collection('users').doc(player.userId).update({
-            monedas: admin.firestore.FieldValue.increment((room.wager || 0) * 2)
+            monedas: admin.firestore.FieldValue.increment(wagerToSteal)
           });
         } catch (e) { 
           console.error(`Score reward err for user ${player.userId}:`, e);
-          if (e instanceof Error) {
-            console.error("Stack:", e.stack);
-          }
         }
       }
     });
@@ -1143,20 +669,6 @@ async function startServer() {
     });
 
 
-    socket.on("disconnecting", () => {
-      socket.rooms.forEach(roomId => {
-        const room = rooms.get(roomId);
-        if (room) {
-          room.players.delete(socket.id);
-          socket.to(roomId).emit("player_left", { id: socket.id });
-          
-          if (room.players.size === 0) {
-            rooms.delete(roomId);
-          }
-        }
-      });
-    });
-
     socket.on("disconnect", () => {
       const userId = (socket as any).userId;
       if (userId && userSockets.get(userId) === socket.id) {
@@ -1171,7 +683,7 @@ async function startServer() {
           if (room.mode === 'wager' || room.mode === 'points' || room.mode === 'ctf') {
             const roomRef = db.collection(room.mode === 'ctf' ? 'ctf_rooms' : (room.mode === 'wager' ? 'wager_rooms' : 'private_rooms')).doc(roomId);
             roomRef.update({
-              [`players.${(player as any).userId}`]: FieldValue.delete()
+              [`players.${(player as any).userId || (player as any).id}`]: FieldValue.delete()
             }).catch(() => {});
 
             if (room.mode === 'ctf' && room.flags) {
@@ -1203,7 +715,7 @@ async function startServer() {
               });
               io.to(roomId).emit("ctf_flag_update", { flags: room.flags });
             }
-            io.to(roomId).emit("player_left", { id: socket.id });
+            io.to(roomId).emit("player_left", { id: socket.id, userId: (player as any).userId, playersCount: room.players.size });
           }
         }
       });
@@ -1218,14 +730,21 @@ async function startServer() {
     const counts: Record<number, number> = {};
     
     ctfWagers.forEach(w => {
-      // Find the room that is currently "waiting" for this wager
-      let totalWaiting = 0;
-      for (const room of rooms.values()) {
-        if (room.mode === 'ctf' && room.wager === w && room.status === 'waiting') {
-          totalWaiting = Math.max(totalWaiting, room.players.size);
-        }
+      // Find the room that is currently "available" for this wager (preferring the one with most players but still having space)
+      const availableRooms = Array.from(rooms.values()).filter(r => 
+        r.mode === 'ctf' && 
+        Number(r.wager || 0) === w && 
+        r.players.size < 4
+      );
+      
+      let bestCount = 0;
+      if (availableRooms.length > 0) {
+        // Prefer room with most players to encourage filling up rooms
+        availableRooms.sort((a, b) => b.players.size - a.players.size);
+        bestCount = availableRooms[0].players.size;
       }
-      counts[w] = totalWaiting;
+      
+      counts[w] = bestCount;
     });
     
     io.emit("ctf_lobby_counts", counts);

@@ -43,7 +43,6 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
   const floatingTextsRef = useRef<{ id: string; x: number; y: number; text: string; color: string; opacity: number }[]>([]);
   const [serverId, setServerId] = useState<string | null>(null);
   const [kills, setKills] = useState<KillEvent[]>([]);
-  const [paymentNotice, setPaymentNotice] = useState<{ id: string; status: string; amount: number } | null>(null);
   const [finalBalance, setFinalBalance] = useState<number | null>(null);
   const [showCancel, setShowCancel] = useState(false);
   const socketRef = useRef<Socket | null>(null);
@@ -148,56 +147,77 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
   }, [serverId]);
 
   useEffect(() => {
-    const initServer = async () => {
+    const initServer = () => {
       try {
-        const id = await findAvailableServer('arenaPlayers');
-        if (!id) throw new Error("No server ID returned");
-        setServerId(id);
-        playerRef.current.serverId = id;
-
-        // Initialize Socket.io
-        const socket = io(window.location.origin);
+        const socket = io();
         socketRef.current = socket;
 
         socket.on("connect", () => {
           console.log("Connected to WebSocket server");
-          // Use a prefix for the serverId based on category to separate players
-          const categoryServerId = `basica_${id}`;
           socket.emit("join_arena", {
             id: user.id,
             displayName: user.displayName,
             equippedSkin: user.equippedSkin,
             hasAura: playerRef.current.hasAura,
             auraType: playerRef.current.auraType,
-            serverId: categoryServerId,
-            wager: 0,
-            mode: 'points'
+            serverId: null,
+            wager: wager,
+            mode: wager > 0 ? 'wager' : 'points'
           });
         });
 
-        socket.on("payment_status_update", (data) => {
-          console.log("Status de pago actualizado:", data);
-          setPaymentNotice(data);
-          setTimeout(() => setPaymentNotice(null), 8000); // Auto close after 8s
-        });
-
-        socket.on("joined_room", ({ roomId }) => {
+        socket.on("joined_room", ({ roomId, players }) => {
           console.log(`Joined WebSocket room: ${roomId}`);
+          setServerId(roomId);
+          playerRef.current.serverId = roomId;
+          if (players) {
+            players.forEach((p: any) => {
+              const playerId = p.userId || p.id;
+              if (playerId !== user.id) {
+                otherPlayersRef.current[playerId] = {
+                  ...otherPlayersRef.current[playerId],
+                  ...p,
+                  lastUpdate: Date.now()
+                };
+              }
+            });
+          }
         });
 
         socket.on("player_moved", (data) => {
-          if (data.id !== user.id) {
-            otherPlayersRef.current[data.id] = {
+          // Use userId for matching if it exists, otherwise use id (socket id)
+          const playerId = data.userId || data.id;
+          if (playerId !== user.id) {
+            otherPlayersRef.current[playerId] = {
+              ...otherPlayersRef.current[playerId],
               ...data,
               lastUpdate: Date.now()
             };
           }
         });
 
-        socket.on("player_died", ({ id, killerName }) => {
-          if (id !== user.id) {
-            delete otherPlayersRef.current[id];
-            delete interpolatedPlayersRef.current[id];
+        socket.on("player_joined", (data) => {
+          const playerId = data.userId || data.id;
+          if (playerId !== user.id) {
+            otherPlayersRef.current[playerId] = {
+              ...otherPlayersRef.current[playerId],
+              ...data,
+              lastUpdate: Date.now()
+            };
+          }
+        });
+
+        socket.on("player_left", ({ id, userId }) => {
+          const playerId = userId || id;
+          delete otherPlayersRef.current[playerId];
+          delete interpolatedPlayersRef.current[playerId];
+        });
+
+        socket.on("player_died", ({ id, userId, killerName }) => {
+          const playerId = userId || id;
+          if (playerId !== user.id) {
+            delete otherPlayersRef.current[playerId];
+            delete interpolatedPlayersRef.current[playerId];
           }
         });
       } catch (err) {
@@ -813,8 +833,9 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
             dropArenaFood(other);
             
             // Delete from local ref to avoid re-triggering this frame
-            delete otherPlayersRef.current[other.id];
-            delete interpolatedPlayersRef.current[other.id];
+            const otherKey = other.userId || other.id;
+            delete otherPlayersRef.current[otherKey];
+            delete interpolatedPlayersRef.current[otherKey];
           }
         });
       }
@@ -2082,7 +2103,7 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
             <span className="text-2xl font-black text-white">{score}</span>
           </div>
           <motion.div 
-            key={`arena-score-total-${finalBalance || (user.coins + score)}`}
+            key={`arena-score-total-v11-${finalBalance || (user.coins + score)}-${Date.now()}`}
             initial={{ scale: 1 }}
             animate={{ scale: [1, 1.1, 1] }}
             className="flex items-center gap-2 rounded-xl bg-yellow-600/30 p-3 backdrop-blur-md border border-yellow-500/30"
@@ -2110,52 +2131,6 @@ export default function Arena({ user, wager, onGameOver }: ArenaProps) {
         </div>
       </div>
 
-      {/* Payment Notification Overlay */}
-      <AnimatePresence>
-        {paymentNotice && (
-          <motion.div
-            initial={{ opacity: 0, x: 50, scale: 0.8 }}
-            animate={{ opacity: 1, x: 0, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.5 }}
-            className="fixed bottom-24 right-6 z-[60] flex max-w-sm flex-col gap-2 rounded-2xl border border-blue-500/30 bg-gray-900/90 p-4 shadow-2xl backdrop-blur-md pointer-events-auto"
-          >
-            <div className="flex items-center gap-3">
-              <div className={`rounded-full p-2 ${paymentNotice.status === 'approved' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
-                {paymentNotice.status === 'approved' ? <Trophy size={20} /> : <Zap size={20} />}
-              </div>
-              <div className="flex-1">
-                <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Notificación de Pago</p>
-                <h4 className="text-sm font-black text-white">
-                  {paymentNotice.status === 'approved' ? '¡Pago Acreditado!' : 'Pago en Proceso...'}
-                </h4>
-              </div>
-              <button 
-                onClick={() => setPaymentNotice(null)}
-                className="text-gray-500 hover:text-white"
-              >
-                <X size={16} />
-              </button>
-            </div>
-            
-            <div className="mt-2 rounded-xl bg-black/30 p-3">
-              <p className="text-[10px] font-bold text-gray-500 uppercase leading-tight">
-                {paymentNotice.status === 'approved' 
-                  ? 'Se han acreditado las monedas en tu cuenta exitosamente.' 
-                  : 'Mercado Pago ha recibido tu solicitud. El saldo se acreditará automáticamente cuando se confirme el pago (puede tardar unos minutos).'}
-              </p>
-              <div className="mt-2 flex items-center justify-between border-t border-white/5 pt-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-lg font-black text-white">+{paymentNotice.amount}</span>
-                  <Coins className="text-yellow-500" size={16} />
-                </div>
-                <span className={`text-[10px] font-bold uppercase ${paymentNotice.status === 'approved' ? 'text-green-500' : 'text-yellow-500'}`}>
-                  {paymentNotice.status.toUpperCase()}
-                </span>
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* Active Powerups UI removed */}
       <div className="pointer-events-none absolute left-4 top-40 flex flex-col gap-2">

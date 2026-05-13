@@ -4,7 +4,7 @@ import { WORLD_W, WORLD_H, BASE_SPEED, CELL, ALL_SKINS, SEGMENT_DISTANCE } from 
 import { doc, updateDoc, increment, setDoc, onSnapshot, collection, query, where, deleteDoc, addDoc, getDocs, getDoc, limit } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { motion, AnimatePresence } from 'motion/react';
-import { Trophy, ArrowLeft, LogOut, Target, X, Timer, Flag } from 'lucide-react';
+import { Trophy, ArrowLeft, LogOut, Target, X, Timer, Flag, Play } from 'lucide-react';
 import { soundManager } from '../lib/sounds';
 import { io, Socket } from 'socket.io-client';
 
@@ -35,6 +35,7 @@ export default function CaptureTheFlagArena({ user, wager, onGameOver }: CTFAren
   const [isWinner, setIsWinner] = useState(false);
   const [serverId, setServerId] = useState<string | null>(null);
   const [playerCorner, setPlayerCorner] = useState<number | null>(null);
+  const [roomStatus, setRoomStatus] = useState<'waiting' | 'playing'>('waiting');
   const socketRef = useRef<Socket | null>(null);
   
   const [flags, setFlags] = useState<{ x: number, y: number, carrierId: string | null, ownerCorner: number, active?: boolean }[]>([
@@ -108,14 +109,27 @@ export default function CaptureTheFlagArena({ user, wager, onGameOver }: CTFAren
           });
         });
 
-        socket.on("joined_room", ({ roomId, corner, flags: serverFlags, playersCount }) => {
+        socket.on("joined_room", ({ roomId, corner, flags: serverFlags, playersCount, players, status }) => {
           setServerId(roomId);
           setPlayerCorner(corner);
           setOnlineCount(playersCount);
+          if (status) setRoomStatus(status);
           
           if (serverFlags) {
             setFlags(serverFlags);
             flagsRef.current = serverFlags;
+          }
+
+          if (players) {
+            players.forEach((p: CTFPlayerSession) => {
+              const playerId = p.userId || p.id;
+              if (playerId !== user.id) {
+                otherPlayersRef.current[playerId] = {
+                  ...p,
+                  lastUpdate: Date.now()
+                };
+              }
+            });
           }
 
           const base = CORNERS[corner];
@@ -134,18 +148,40 @@ export default function CaptureTheFlagArena({ user, wager, onGameOver }: CTFAren
           setIsLoading(false);
         });
 
-        socket.on("player_joined", ({ playersCount }) => {
-          setOnlineCount(playersCount);
+        socket.on("player_joined", (data) => {
+          if (data.playersCount) setOnlineCount(data.playersCount);
+          const playerId = data.userId || data.id;
+          if (playerId !== user.id) {
+            const existing = otherPlayersRef.current[playerId] || {};
+            otherPlayersRef.current[playerId] = {
+              ...existing,
+              ...data,
+              lastUpdate: Date.now()
+            } as any;
+          }
         });
 
-        socket.on("player_left", ({ id, playersCount }) => {
-          setOnlineCount(playersCount);
-          delete otherPlayersRef.current[id];
+        socket.on("player_left", (data) => {
+          if (data.playersCount) setOnlineCount(data.playersCount);
+          const playerId = data.userId || data.id;
+          if (playerId) {
+            delete otherPlayersRef.current[playerId];
+          }
+        });
+
+        socket.on("player_died", ({ id, userId, killerName }) => {
+          const playerId = userId || id;
+          if (playerId !== user.id) {
+            delete otherPlayersRef.current[playerId];
+          }
         });
 
         socket.on("player_moved", (data) => {
-          if (data.id !== socket.id) {
-            otherPlayersRef.current[data.id] = {
+          const playerId = data.userId || data.id;
+          if (playerId !== user.id) {
+            const existing = otherPlayersRef.current[playerId] || {};
+            otherPlayersRef.current[playerId] = {
+              ...existing,
               ...data,
               lastUpdate: Date.now()
             };
@@ -164,8 +200,19 @@ export default function CaptureTheFlagArena({ user, wager, onGameOver }: CTFAren
             playerRef.current.isEliminated = true;
             soundManager.play('death');
           } else {
-            if (socketId) delete otherPlayersRef.current[socketId];
+            const playerId = id || socketId;
+            if (playerId) {
+              delete otherPlayersRef.current[playerId];
+            }
           }
+        });
+
+        socket.on("ctf_defeated", ({ message, wagerLost }) => {
+          setIsEliminated(true);
+          setIsAlive(false);
+          playerRef.current.isEliminated = true;
+          soundManager.play('death');
+          // We can use the message from server
         });
 
         socket.on("ctf_score", ({ scorerId, reward }) => {
@@ -174,6 +221,16 @@ export default function CaptureTheFlagArena({ user, wager, onGameOver }: CTFAren
             setIsWinner(true);
             setTimeout(() => setIsWinner(false), 3000);
           }
+        });
+        
+        socket.on("ctf_game_start", ({ status }) => {
+          setRoomStatus(status);
+          soundManager.play('plim');
+        });
+
+        socket.on("room_full", ({ error }) => {
+          alert(error);
+          onGameOver();
         });
 
         socket.on("server_death", ({ killerName }) => {
@@ -541,6 +598,7 @@ export default function CaptureTheFlagArena({ user, wager, onGameOver }: CTFAren
 
     // Draw Flags
     flagsRef.current.forEach((flag, i) => {
+      if (!flag.active) return;
       ctx.fillStyle = COLORS[flag.ownerCorner];
       ctx.beginPath();
       ctx.arc(flag.x * scale, flag.y * scale, 5, 0, Math.PI * 2);
@@ -733,6 +791,36 @@ export default function CaptureTheFlagArena({ user, wager, onGameOver }: CTFAren
       </div>
 
       <AnimatePresence>
+        {roomStatus === 'waiting' && isAlive && !isEliminated && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-40 flex flex-col items-center justify-center bg-black/40 backdrop-blur-[2px]"
+          >
+            <div className="flex flex-col items-center gap-6 rounded-3xl bg-black/60 p-12 border border-white/10 backdrop-blur-md">
+              <div className="relative">
+                <Timer size={48} className="text-red-500 animate-pulse" />
+                <div className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-green-500 animate-ping" />
+              </div>
+              <div className="text-center">
+                <h3 className="text-3xl font-black italic text-white uppercase tracking-tighter">Esperando Competidores</h3>
+                <p className="mt-2 text-xs font-bold text-gray-400 uppercase tracking-[0.3em]">{onlineCount}/4 JUGADORES LISTOS</p>
+              </div>
+
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => socketRef.current?.emit("start_ctf_early")}
+                className="group relative flex items-center gap-3 rounded-2xl bg-white px-8 py-4 transition-all hover:bg-blue-500"
+              >
+                <Play size={20} className="text-black group-hover:text-white" />
+                <span className="text-lg font-black italic uppercase text-black group-hover:text-white">Continuar</span>
+              </motion.button>
+            </div>
+          </motion.div>
+        )}
+
         {showExitWarning && (
            <motion.div 
              key="exit-warning"
@@ -757,7 +845,7 @@ export default function CaptureTheFlagArena({ user, wager, onGameOver }: CTFAren
             <div className="mb-6 rounded-full bg-red-600/20 p-8">
               <LogOut size={64} className="text-red-500" />
             </div>
-            <h2 className="mb-2 text-5xl font-black italic tracking-tighter text-white uppercase">¡BANDERAS ROBADA!</h2>
+            <h2 className="mb-2 text-5xl font-black italic tracking-tighter text-white uppercase">¡BANDERA ROBADA!</h2>
             <p className="mb-8 max-w-sm text-lg text-gray-400 font-medium leading-relaxed uppercase tracking-widest">
               Alguien ha llevado tu bandera a su base. Has perdido la apuesta de {wager.toLocaleString()} monedas.
             </p>

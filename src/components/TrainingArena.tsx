@@ -1659,9 +1659,9 @@ export default function TrainingArena({ user, botCount = 1, initialWager = 0, se
 
       {/* Floating Texts */}
       <div className="pointer-events-none fixed inset-0 z-[100]">
-        {floatingTexts.map(ft => (
+        {floatingTexts.map((ft, idx) => (
           <motion.div
-            key={ft.id}
+            key={`ft-render-${ft.id}-${idx}`}
             initial={{ opacity: 1, y: ft.y }}
             animate={{ opacity: 0, y: ft.y - 100 }}
             className="absolute font-black text-xs uppercase tracking-widest whitespace-nowrap"

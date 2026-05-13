@@ -169,15 +169,3 @@ export interface PrivateMessage {
   text: string;
   timestamp: number;
 }
-
-export interface Notification {
-  id: string;
-  type: 'game_invite';
-  fromId: string;
-  fromName: string;
-  toId: string;
-  roomId?: string;
-  wager?: number;
-  status: 'pending' | 'accepted' | 'rejected';
-  timestamp: number;
-}

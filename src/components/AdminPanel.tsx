@@ -35,7 +35,6 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
   const [withdrawalFilter, setWithdrawalFilter] = useState<'all' | 'pending' | 'completed'>('all');
   const [transactionIds, setTransactionIds] = useState<Record<string, string>>({});
   const [selectedWithdrawal, setSelectedWithdrawal] = useState<WithdrawalRequest | null>(null);
-  const [bridgeNotifications, setBridgeNotifications] = useState<any[]>([]);
 
   useEffect(() => {
     setLoading(true);
@@ -64,21 +63,9 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
       handleFirestoreError(e, OperationType.LIST, 'withdrawals');
     });
 
-    const qBridge = query(collection(db, 'payment_notifications'), orderBy('received_at', 'desc'), limit(50));
-    const unsubBridge = onSnapshot(qBridge, (snapshot) => {
-      const notes = snapshot.docs.map(doc => ({ 
-        firestoreId: doc.id, 
-        ...doc.data() 
-      }));
-      setBridgeNotifications(notes);
-    }, (e) => {
-      console.error("Error fetching bridge notifications:", e);
-    });
-
     return () => {
       unsubUsers();
       unsubWithdrawals();
-      unsubBridge();
     };
   }, []);
 
@@ -115,6 +102,43 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
     } catch (e) {
       setMessage({ text: 'Error al actualizar', type: 'error' });
       handleFirestoreError(e, OperationType.UPDATE, `users/${userId}`);
+    }
+    setTimeout(() => setMessage(null), 3000);
+  };
+
+  const handleRejectWithdrawal = async (withdrawal: WithdrawalRequest) => {
+    if (!window.confirm('¿Estás seguro de rechazar este retiro? Las monedas serán devueltas al usuario.')) return;
+
+    setLoading(true);
+    try {
+      const withdrawalRef = doc(db, 'withdrawals', withdrawal.id);
+      await updateDoc(withdrawalRef, {
+        status: 'rejected',
+        rejectedAt: Date.now()
+      });
+
+      // Return coins to user
+      const userRef = doc(db, 'users', withdrawal.userId);
+      await updateDoc(userRef, {
+        monedas: increment(withdrawal.amount)
+      });
+
+      // Sync Supabase
+      await supabase.from('profiles').update({
+        monedas: increment(withdrawal.amount)
+      }).eq('id', withdrawal.userId);
+
+      await supabase.from('withdrawals').update({
+        status: 'rejected',
+        rejected_at: new Date().toISOString()
+      }).eq('id_firestore', withdrawal.id);
+
+      setMessage({ text: 'Retiro rechazado y monedas devueltas', type: 'success' });
+    } catch (e) {
+      setMessage({ text: 'Error al rechazar retiro', type: 'error' });
+      handleFirestoreError(e, OperationType.UPDATE, `withdrawals/${withdrawal.id}`);
+    } finally {
+      setLoading(false);
     }
     setTimeout(() => setMessage(null), 3000);
   };
@@ -218,12 +242,6 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
               >
                 <CreditCard size={18} /> Retiros
               </button>
-              <button 
-                onClick={() => setActiveTab('bridge')}
-                className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition-all ${activeTab === 'bridge' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white'}`}
-              >
-                <RefreshCw size={18} /> Puente
-              </button>
             </div>
 
             <div className="relative flex-1">
@@ -262,7 +280,7 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
             {activeTab === 'users' ? (
               <div className="space-y-2">
                 {filteredUsers.map((u, idx) => (
-                  <div key={`admin-u-${u.id}-${idx}`} className="flex items-center gap-4 rounded-xl bg-gray-800/40 p-3 border border-white/5 hover:border-white/10 transition-colors">
+                  <div key={`admin-user-${u.id}-${idx}`} className="flex items-center gap-4 rounded-xl bg-gray-800/40 p-3 border border-white/5 hover:border-white/10 transition-colors">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <h3 className="text-sm font-black text-white truncate">{u.displayName}</h3>
@@ -351,9 +369,9 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-4 mb-4">
                   <div className="flex gap-2">
-                    {(['all', 'pending', 'completed'] as const).map((f) => (
+                    {(['all', 'pending', 'completed', 'rejected'] as const).map((f, idx) => (
                       <button
-                        key={f}
+                        key={`admin-withdraw-filter-${f}-${idx}`}
                         onClick={() => setWithdrawalFilter(f)}
                         className={`rounded-xl px-4 py-2 text-[10px] font-black uppercase tracking-widest transition-all ${
                           withdrawalFilter === f 
@@ -361,7 +379,7 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                             : 'bg-gray-800 text-gray-400 hover:text-white'
                         }`}
                       >
-                        {f === 'all' ? 'Todos' : f === 'pending' ? 'Pendientes' : 'Completados'}
+                        {f === 'all' ? 'Todos' : f === 'pending' ? 'Pendientes' : f === 'completed' ? 'Completados' : 'Rechazados'}
                       </button>
                     ))}
                   </div>
@@ -382,7 +400,7 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                   const matchesFilter = withdrawalFilter === 'all' || w.status === withdrawalFilter;
                   return matchesSearch && matchesFilter;
                 }).map((w: any, idx) => (
-                  <div key={`admin-withdraw-${w.id || w.firestoreId || idx}-${idx}`} className={`rounded-2xl border p-4 transition-all ${w.status === 'pending' ? 'border-blue-500/30 bg-blue-500/5' : 'border-white/5 bg-gray-800/40'}`}>
+                  <div key={`admin-withdraw-item-${w.id}-${idx}`} className={`rounded-2xl border p-4 transition-all ${w.status === 'pending' ? 'border-blue-500/30 bg-blue-500/5' : 'border-white/5 bg-gray-800/40'}`}>
                     <div className="mb-4 flex items-start justify-between">
                       <div>
                         <div className="flex items-center gap-2">
@@ -413,19 +431,27 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                     </div>
 
                     {w.status === 'pending' ? (
-                      <div className="flex gap-2">
-                        <input 
-                          type="text"
-                          placeholder="N° de Transferencia / Comprobante"
-                          value={transactionIds[w.id] || ''}
-                          onChange={(e) => setTransactionIds(prev => ({ ...prev, [w.id]: e.target.value }))}
-                          className="flex-1 rounded-xl bg-gray-900 px-4 py-3 text-sm font-bold text-white outline-none focus:ring-2 focus:ring-green-500/50"
-                        />
+                      <div className="flex flex-col gap-2">
+                        <div className="flex gap-2">
+                          <input 
+                            type="text"
+                            placeholder="N° de Transferencia / Comprobante"
+                            value={transactionIds[w.id] || ''}
+                            onChange={(e) => setTransactionIds(prev => ({ ...prev, [w.id]: e.target.value }))}
+                            className="flex-1 rounded-xl bg-gray-900 px-4 py-3 text-sm font-bold text-white outline-none focus:ring-2 focus:ring-green-500/50"
+                          />
+                          <button 
+                            onClick={() => handleCompleteWithdrawal(w)}
+                            className="flex items-center gap-2 rounded-xl bg-green-600 px-6 font-black text-white hover:bg-green-500 transition-all shadow-lg shadow-green-500/20"
+                          >
+                            <CheckCircle2 size={20} /> CERTIFICAR
+                          </button>
+                        </div>
                         <button 
-                          onClick={() => handleCompleteWithdrawal(w)}
-                          className="flex items-center gap-2 rounded-xl bg-green-600 px-6 font-black text-white hover:bg-green-500 transition-all shadow-lg shadow-green-500/20"
+                          onClick={() => handleRejectWithdrawal(w)}
+                          className="w-full rounded-xl bg-red-600/10 py-2 text-[10px] font-black uppercase tracking-widest text-red-500 hover:bg-red-600/20 transition-all border border-red-500/10"
                         >
-                          <CheckCircle2 size={20} /> CERTIFICAR
+                          Rechazar Solicitud
                         </button>
                       </div>
                     ) : (
@@ -443,41 +469,6 @@ export default function AdminPanel({ onClose, adminUser }: AdminPanelProps) {
                   <div className="flex flex-col items-center justify-center py-20 text-gray-500">
                     <History size={48} className="mb-4 opacity-20" />
                     <p className="font-bold">No hay solicitudes de retiro</p>
-                  </div>
-                )}
-              </div>
-            ) : activeTab === 'bridge' ? (
-              <div className="space-y-4">
-                {bridgeNotifications.map((n, idx) => (
-                  <div key={`admin-bridge-${n.firestoreId || idx}-${idx}`} className="rounded-2xl border border-white/5 bg-gray-800/40 p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className={`h-2 w-2 rounded-full ${n.processed ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`} />
-                        <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">BRIDGE ID: {n.payment_id}</span>
-                      </div>
-                      <span className="text-[10px] text-gray-500">{(n.received_at as any)?.toDate?.().toLocaleString() || 'Ahora'}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div className="text-left">
-                        <p className="text-[10px] text-gray-500 uppercase tracking-tighter">Procesado</p>
-                        <p className={`text-xs font-black ${n.processed ? 'text-green-400' : 'text-yellow-500'}`}>
-                          {n.processed ? 'SI' : 'PENDIENTE'}
-                        </p>
-                      </div>
-                      {n.error && (
-                        <div className="text-right">
-                          <p className="text-[10px] text-red-500 uppercase tracking-tighter">Error</p>
-                          <p className="text-[10px] text-red-400 italic max-w-[150px] truncate">{n.error}</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
-                {bridgeNotifications.length === 0 && (
-                  <div className="flex flex-col items-center justify-center py-20 text-gray-500">
-                    <RefreshCw size={48} className="mb-4 opacity-20" />
-                    <p className="font-bold uppercase tracking-widest">No hay notificaciones del puente</p>
-                    <p className="text-xs">Usa el simulador de Mercado Pago para probar.</p>
                   </div>
                 )}
               </div>

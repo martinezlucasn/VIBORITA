@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { User, Friendship, Skin, PrivateMessage } from '../../types';
 import { db, auth, handleFirestoreError, OperationType } from '../../firebase';
 import { doc, updateDoc, increment, collection, query, where, orderBy, limit, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
-import { X, MessageSquare, Zap, Heart, Trophy, Medal, Target, Skull, Send, ShieldCheck, ArrowRightLeft, Smile, AlertTriangle, UserMinus, CreditCard, Ticket } from 'lucide-react';
+import { X, MessageSquare, Zap, Heart, Trophy, Target, Skull, Send, ShieldCheck, ArrowRightLeft, Smile, AlertTriangle, UserMinus } from 'lucide-react';
 import { MonedasIcon, GoldPointIcon } from '../Icons';
 import { ALL_SKINS } from '../../constants';
 
@@ -12,11 +12,11 @@ interface ExpandedFriendProfileProps {
   onClose: () => void;
   currentUser: User;
   friendship: Friendship;
-  onInvite: (wager: number) => void;
   listings: any[];
   onBuySkin: (listing: any) => void;
   onDeleteFriend?: (friendshipId: string) => void;
   onTransfer?: (amount: number, currency: 'coins' | 'monedas') => void;
+  onInvite?: (wager: number) => void;
 }
 
 const FRIENDSHIP_RANKS = [
@@ -27,7 +27,17 @@ const FRIENDSHIP_RANKS = [
   { level: 100, name: 'Leyendas', color: 'text-yellow-400', bg: 'bg-yellow-400/10' },
 ];
 
-export default function ExpandedFriendProfile({ friend, onClose, currentUser, friendship, onInvite, listings, onBuySkin, onDeleteFriend, onTransfer }: ExpandedFriendProfileProps) {
+export default function ExpandedFriendProfile({ 
+  friend, 
+  onClose, 
+  currentUser, 
+  friendship, 
+  listings, 
+  onBuySkin, 
+  onDeleteFriend, 
+  onTransfer,
+  onInvite 
+}: ExpandedFriendProfileProps) {
   const [activeTab, setActiveTab] = useState<'profile' | 'chat' | 'rivalry'>('profile');
   const [messages, setMessages] = useState<PrivateMessage[]>([]);
   const [newMessage, setNewMessage] = useState('');
@@ -130,9 +140,9 @@ export default function ExpandedFriendProfile({ friend, onClose, currentUser, fr
               { id: 'profile', icon: UserIcon, label: 'Perfil' },
               { id: 'chat', icon: MessageSquare, label: 'Chat' },
               { id: 'rivalry', icon: Trophy, label: 'Rivalidad' }
-            ].map(tab => (
+            ].map((tab, idx) => (
               <button
-                key={`tab-nav-${tab.id}`}
+                key={`tab-nav-${tab.id}-${idx}`}
                 onClick={() => setActiveTab(tab.id as any)}
                 className={`flex flex-1 items-center justify-center gap-1 rounded-xl py-3 text-[10px] sm:text-xs font-black uppercase tracking-wider transition-all px-1 ${
                   activeTab === tab.id ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'
@@ -181,13 +191,7 @@ export default function ExpandedFriendProfile({ friend, onClose, currentUser, fr
                           <span className="text-lg font-black text-blue-400 italic">{friend.highScoreMonedas?.toLocaleString() || 0}</span>
                         </div>
                       </div>
-                      <div className="rounded-2xl bg-white/5 p-3 border border-white/5">
-                        <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest mb-0.5">Medallas</p>
-                        <div className="flex items-center gap-2">
-                          <Medal size={16} className="text-purple-400" />
-                          <span className="text-lg font-black text-white italic">{friend.trophies || 0}</span>
-                        </div>
-                      </div>
+
                     </div>
                   </div>
 
@@ -243,7 +247,7 @@ export default function ExpandedFriendProfile({ friend, onClose, currentUser, fr
                               if (!skin) return null;
                               return (
                                 <div 
-                                  key={`friend-listing-${listing.id || idx}`}
+                                  key={`friend-listing-${listing.id}-${idx}`}
                                   className="flex items-center justify-between rounded-2xl bg-black/40 border border-white/10 p-3 hover:border-blue-500/30 transition-colors"
                                 >
                                   <div className="flex items-center gap-3">
@@ -298,12 +302,6 @@ export default function ExpandedFriendProfile({ friend, onClose, currentUser, fr
                     >
                       <MessageSquare size={20} />
                     </button>
-                    <button 
-                      onClick={() => onInvite(numericWager)}
-                      className="flex h-12 w-12 items-center justify-center rounded-2xl bg-red-600 text-white shadow-lg shadow-red-600/20 hover:bg-red-500"
-                    >
-                      <Zap size={20} />
-                    </button>
                   </div>
                 </motion.div>
               )}
@@ -325,7 +323,7 @@ export default function ExpandedFriendProfile({ friend, onClose, currentUser, fr
                       </div>
                     ) : (
                       messages.map((msg, idx) => (
-                        <div key={`ms-pk-${msg.id || idx}`} className={`flex ${msg.senderId === currentUser.id ? 'justify-end' : 'justify-start'}`}>
+                        <div key={`ms-pk-${msg.id}-${idx}`} className={`flex ${msg.senderId === currentUser.id ? 'justify-end' : 'justify-start'}`}>
                           <div className={`max-w-[85%] rounded-2xl px-3 py-1.5 text-xs font-bold shadow-lg ${
                             msg.senderId === currentUser.id 
                               ? 'bg-blue-600 text-white' 
@@ -417,20 +415,6 @@ export default function ExpandedFriendProfile({ friend, onClose, currentUser, fr
                         </div>
                         
                          <div className="relative">
-                           <button 
-                               onClick={() => onInvite(numericWager)}
-                               disabled={currentUser.monedas < numericWager || (rivalInsufficient && numericWager > 0)}
-                               className="group relative w-full overflow-hidden rounded-xl bg-red-600 py-4 font-black uppercase text-white shadow-2xl shadow-red-600/40 transition-all hover:bg-red-500 active:scale-95 disabled:opacity-50 disabled:grayscale"
-                           >
-                               <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
-                               <div className="flex items-center justify-center gap-2">
-                                  <Zap size={18} className={isFriendly ? "" : "animate-pulse"} />
-                                  <span className="text-base tracking-tighter italic">
-                                    {isFriendly ? "Amistoso" : "Desafiar"}
-                                  </span>
-                               </div>
-                           </button>
-
                            <AnimatePresence>
                              {rivalInsufficient && numericWager > 0 && (
                                <motion.div 
