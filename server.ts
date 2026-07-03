@@ -48,6 +48,123 @@ function initCTFFlags() {
 async function startServer() {
   const app = express();
   app.use(express.json());
+
+  // API endpoint for AI background music generation using Google Lyria
+  app.post("/api/generate-music", async (req, res) => {
+    const { type, prompt } = req.body;
+    const apiKey = process.env.GEMINI_API_KEY;
+
+    if (!apiKey) {
+      return res.status(400).json({ 
+        error: "La clave API de Gemini (GEMINI_API_KEY) no está configurada. Por favor, asegúrate de añadirla en los Secretos de la aplicación." 
+      });
+    }
+
+    try {
+      const { GoogleGenAI } = await import("@google/genai");
+      const aiClient = new GoogleGenAI({ apiKey });
+      
+      let generationPrompt = "";
+      if (prompt) {
+        generationPrompt = prompt;
+      } else if (type === "menu") {
+        generationPrompt = "Generate a relaxing, atmospheric, warm synth background music loop for a casual classic retro arcade style snake game. Cozy, slow tempo, 90 bpm, light melodic, looped, instrumental, electronic, pleasant and relaxing background.";
+      } else { // gameplay / playing / ctf / training / wager
+        generationPrompt = "Generate an addictive, energetic, fast-paced synth wave theme for a snake game. Accelerated tempo, 130 bpm, driving electronic drums, punchy retro synth bassline, high energy, immersive action game style loop, instrumental.";
+      }
+
+      console.log(`[Lyria] Generating music for type "${type || 'custom'}" with prompt: "${generationPrompt}"`);
+
+      // Using lyria-3-clip-preview for 30-second loopable soundtracks (optimized for fast gameplay responses)
+      const responseStream = await aiClient.models.generateContentStream({
+        model: "lyria-3-clip-preview",
+        contents: generationPrompt,
+      });
+
+      let audioBase64 = "";
+      let lyrics = "";
+      let mimeType = "audio/wav";
+
+      for await (const chunk of responseStream) {
+        const parts = chunk.candidates?.[0]?.content?.parts;
+        if (!parts) continue;
+
+        for (const part of parts) {
+          if (part.inlineData?.data) {
+            if (!audioBase64 && part.inlineData.mimeType) {
+              mimeType = part.inlineData.mimeType;
+            }
+            audioBase64 += part.inlineData.data;
+          }
+          if (part.text && !lyrics) {
+            lyrics = part.text;
+          }
+        }
+      }
+
+      if (!audioBase64) {
+        throw new Error("No se recibieron datos de audio del modelo de generación Lyria.");
+      }
+
+      console.log(`[Lyria] Music generated successfully. Length: ${audioBase64.length} chars. MimeType: ${mimeType}`);
+
+      res.json({
+        audio: audioBase64,
+        mimeType,
+        lyrics
+      });
+
+    } catch (error: any) {
+      console.error("Error generating music with Lyria:", error);
+      
+      let errorMessage = "Error interno al generar la música de fondo con el modelo Lyria.";
+      if (error && error.message) {
+        const msg = String(error.message);
+        if (msg.includes("API key not valid") || msg.includes("API_KEY_INVALID") || msg.includes("key not valid") || msg.includes("invalid api key")) {
+          errorMessage = "La clave API de Gemini no es válida o no está configurada. Por favor, ve al menú de Ajustes de AI Studio (arriba a la derecha, ícono de engranaje) y añade una variable de entorno con el nombre GEMINI_API_KEY y tu clave API de Gemini válida de Google AI Studio.";
+        } else if (msg.includes("quota") || msg.includes("Quota exceeded") || msg.includes("429")) {
+          errorMessage = "Se ha superado la cuota de generación de música para tu clave API de Gemini o el modelo Lyria no tiene disponibilidad en este momento. Por favor, vuelve a intentarlo más tarde.";
+        } else {
+          // Try to parse JSON if the SDK error message is a stringed JSON
+          try {
+            // Some error messages from the fetch client contain a JSON string
+            const jsonStart = msg.indexOf("{");
+            if (jsonStart !== -1) {
+              const jsonStr = msg.substring(jsonStart);
+              const parsed = JSON.parse(jsonStr);
+              if (parsed.error && parsed.error.message) {
+                errorMessage = parsed.error.message;
+              } else if (parsed.message) {
+                errorMessage = parsed.message;
+              }
+            } else {
+              errorMessage = msg;
+            }
+          } catch (e) {
+            errorMessage = msg;
+          }
+        }
+      } else if (error && error.statusText) {
+        errorMessage = error.statusText;
+      }
+      
+      // Clean up any double stringified errors
+      if (errorMessage.includes('"message":') || errorMessage.includes('{"error":')) {
+        try {
+          const innerParse = JSON.parse(errorMessage.substring(errorMessage.indexOf("{")));
+          if (innerParse.error && innerParse.error.message) {
+            errorMessage = innerParse.error.message;
+          } else if (innerParse.message) {
+            errorMessage = innerParse.message;
+          }
+        } catch (e) {}
+      }
+
+      res.status(500).json({ 
+        error: errorMessage
+      });
+    }
+  });
   
   const httpServer = createServer(app);
   const io = new Server(httpServer, {

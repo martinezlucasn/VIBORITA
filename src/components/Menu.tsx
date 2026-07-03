@@ -12,6 +12,7 @@ import { doc, updateDoc, onSnapshot, collection, query, where, orderBy, limit, g
 import { db, handleFirestoreError, auth, OperationType } from '../firebase';
 import { signOut, deleteUser } from 'firebase/auth';
 import { soundManager } from '../lib/sounds';
+import { musicManager } from '../lib/music';
 import { GoogleGenAI } from "@google/genai";
 import { io, Socket } from 'socket.io-client';
 import ExpandedFriendProfile from './Social/ExpandedFriendProfile';
@@ -171,6 +172,73 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
   const [sfxEnabled, setSfxEnabled] = useState(soundManager.isSFXEnabled());
   const [showControls, setShowControls] = useState(false);
   const [highQuality, setHighQuality] = useState(true);
+
+  // Background music state & AI generation controls
+  const [musicEnabled, setMusicEnabled] = useState(musicManager.isMusicEnabled());
+  const [musicVolume, setMusicVolume] = useState(musicManager.getVolume());
+  const [generatingMusic, setGeneratingMusic] = useState<'menu' | 'gameplay' | null>(null);
+  const [musicStatus, setMusicStatus] = useState<string>('');
+  const [musicError, setMusicError] = useState<string | null>(null);
+  const [hasCustomMenu, setHasCustomMenu] = useState(!!musicManager.getCustomTrack('menu'));
+  const [hasCustomGameplay, setHasCustomGameplay] = useState(!!musicManager.getCustomTrack('gameplay'));
+
+  const handleGenerateMusic = async (type: 'menu' | 'gameplay') => {
+    setGeneratingMusic(type);
+    setMusicStatus('Generando música con IA Lyria (toma ~15s)...');
+    setMusicError(null);
+
+    try {
+      const response = await fetch('/api/generate-music', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type })
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || 'Error al generar la música.');
+      }
+
+      const data = await response.json();
+      if (!data.audio) {
+        throw new Error('No se recibió la pista de audio generada.');
+      }
+
+      setMusicStatus('Decodificando y configurando audio...');
+      
+      // Create a playable data URL for Howler
+      const dataUrl = `data:${data.mimeType};base64,${data.audio}`;
+      
+      // Update music manager
+      musicManager.setCustomTrack(type, dataUrl);
+      
+      if (type === 'menu') {
+        setHasCustomMenu(true);
+      } else {
+        setHasCustomGameplay(true);
+      }
+
+      setMusicStatus('¡Pista generada y activada con éxito!');
+      setTimeout(() => {
+        setGeneratingMusic(null);
+        setMusicStatus('');
+      }, 3000);
+
+    } catch (err: any) {
+      console.error('Error generating AI BGM:', err);
+      setMusicError(err.message || 'No se pudo conectar con el servidor.');
+      setGeneratingMusic(null);
+    }
+  };
+
+  const handleClearCustomMusic = (type: 'menu' | 'gameplay') => {
+    musicManager.clearCustomTrack(type);
+    if (type === 'menu') {
+      setHasCustomMenu(false);
+    } else {
+      setHasCustomGameplay(false);
+    }
+  };
   const [showTrainingModal, setShowTrainingModal] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<{ type: 'latest' | 'available' | 'error', msg: string } | null>(null);
@@ -4176,8 +4244,8 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                   </button>
                 </div>
 
-                <div className="p-6 space-y-4">
-                  <div className="grid grid-cols-1 gap-3">
+                <div className="p-6 space-y-4 overflow-y-auto custom-scrollbar max-h-[60vh]">
+                  <div className="grid grid-cols-2 gap-3">
                     <button 
                       onClick={() => {
                           const next = !sfxEnabled;
@@ -4189,6 +4257,128 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                       {sfxEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
                       <span className="text-[10px] uppercase tracking-widest">SFX</span>
                     </button>
+
+                    <button 
+                      onClick={() => {
+                          const next = !musicEnabled;
+                          setMusicEnabled(next);
+                          musicManager.toggleMusic(next);
+                      }}
+                      className={`flex items-center justify-center gap-2 rounded-2xl p-4 font-bold border transition-all ${musicEnabled ? 'bg-blue-600/20 border-blue-500/30 text-blue-400' : 'bg-gray-800 border-white/5 text-gray-500'}`}
+                    >
+                      {musicEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+                      <span className="text-[10px] uppercase tracking-widest">Música</span>
+                    </button>
+                  </div>
+
+                  {musicEnabled && (
+                    <div className="bg-gray-800/60 rounded-2xl p-4 border border-white/5 space-y-2">
+                      <div className="flex items-center justify-between text-[9px] uppercase tracking-wider text-gray-400 font-bold">
+                        <span>Volumen de Música</span>
+                        <span>{Math.round(musicVolume * 100)}%</span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="1" 
+                        step="0.05" 
+                        value={musicVolume}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          setMusicVolume(val);
+                          musicManager.setVolume(val);
+                        }}
+                        className="w-full accent-blue-500 h-1.5 bg-gray-950 rounded-lg appearance-none cursor-pointer"
+                      />
+                    </div>
+                  )}
+
+                  {/* AI Music Customization with Lyria */}
+                  <div className="space-y-3 border-t border-white/5 pt-4">
+                    <div className="flex items-center gap-2">
+                      <Sparkles size={14} className="text-purple-400" />
+                      <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Personalizar Música (IA Lyria)</p>
+                    </div>
+                    
+                    <div className="grid grid-cols-1 gap-3">
+                      {/* Menu Soundtrack Generator */}
+                      <div className="bg-gray-800/40 p-4 rounded-2xl border border-white/5 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-black uppercase text-white tracking-tight">Menú de Inicio</span>
+                          <span className="text-[8px] font-mono uppercase bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded-full">{hasCustomMenu ? 'Personalizada' : 'Original'}</span>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            disabled={generatingMusic !== null}
+                            onClick={() => handleGenerateMusic('menu')}
+                            className="flex-1 rounded-xl bg-purple-600/20 border border-purple-500/30 hover:bg-purple-600/30 py-2.5 text-[9px] font-black uppercase tracking-wider text-purple-400 transition-all disabled:opacity-50"
+                          >
+                            {generatingMusic === 'menu' ? <Loader2 size={14} className="animate-spin inline mr-1" /> : <Sparkles size={14} className="inline mr-1" />}
+                            Generar con Lyria
+                          </button>
+                          {hasCustomMenu && (
+                            <button
+                              disabled={generatingMusic !== null}
+                              onClick={() => handleClearCustomMusic('menu')}
+                              className="rounded-xl bg-red-600/10 border border-red-500/20 hover:bg-red-600/20 px-3 py-2.5 text-[9px] font-black uppercase tracking-wider text-red-400 transition-all"
+                              title="Restablecer original"
+                            >
+                              <X size={14} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Gameplay Soundtrack Generator */}
+                      <div className="bg-gray-800/40 p-4 rounded-2xl border border-white/5 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-black uppercase text-white tracking-tight">Arena de Juego</span>
+                          <span className="text-[8px] font-mono uppercase bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded-full">{hasCustomGameplay ? 'Personalizada' : 'Original'}</span>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            disabled={generatingMusic !== null}
+                            onClick={() => handleGenerateMusic('gameplay')}
+                            className="flex-1 rounded-xl bg-purple-600/20 border border-purple-500/30 hover:bg-purple-600/30 py-2.5 text-[9px] font-black uppercase tracking-wider text-purple-400 transition-all disabled:opacity-50"
+                          >
+                            {generatingMusic === 'gameplay' ? <Loader2 size={14} className="animate-spin inline mr-1" /> : <Sparkles size={14} className="inline mr-1" />}
+                            Generar con Lyria
+                          </button>
+                          {hasCustomGameplay && (
+                            <button
+                              disabled={generatingMusic !== null}
+                              onClick={() => handleClearCustomMusic('gameplay')}
+                              className="rounded-xl bg-red-600/10 border border-red-500/20 hover:bg-red-600/20 px-3 py-2.5 text-[9px] font-black uppercase tracking-wider text-red-400 transition-all"
+                              title="Restablecer original"
+                            >
+                              <X size={14} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Status and Errors */}
+                    {musicStatus && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: -5 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="p-3 bg-purple-500/10 border border-purple-500/20 text-purple-300 text-[10px] font-bold rounded-2xl text-center flex items-center justify-center gap-2"
+                      >
+                        <Loader2 size={12} className="animate-spin text-purple-400" />
+                        <span>{musicStatus}</span>
+                      </motion.div>
+                    )}
+
+                    {musicError && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: -5 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-[9px] font-bold rounded-2xl text-center"
+                      >
+                        {musicError}
+                      </motion.div>
+                    )}
                   </div>
 
                   {/* Controls Button */}

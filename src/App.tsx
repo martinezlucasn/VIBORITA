@@ -15,6 +15,7 @@ import CaptureTheFlagArena from './components/CaptureTheFlagArena';
 import { motion, AnimatePresence } from 'motion/react';
 import { LogIn, Loader2, ShieldCheck, X, Download, AlertCircle, User as UserIcon } from 'lucide-react';
 import { soundManager } from './lib/sounds';
+import { musicManager } from './lib/music';
 
 const soundManagerInstance = soundManager; // Use the imported soundManager
 
@@ -36,6 +37,15 @@ export default function App() {
   const [fbReady, setFbReady] = useState(false);
   const [needsUpdate, setNeedsUpdate] = useState(false);
   const [appConfig, setAppConfig] = useState<any>(null);
+
+  // Background music manager transition effect
+  useEffect(() => {
+    if (gameState === 'menu') {
+      musicManager.play('menu');
+    } else {
+      musicManager.play('gameplay');
+    }
+  }, [gameState]);
 
   useEffect(() => {
     // Version check
