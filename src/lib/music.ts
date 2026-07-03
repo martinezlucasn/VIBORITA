@@ -1,4 +1,4 @@
-import { Howl } from 'howler';
+import { Howl, Howler } from 'howler';
 
 const DEFAULT_TRACKS = {
   menu: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3', // Relaxed, chill synth
@@ -36,6 +36,32 @@ class MusicManager {
     } catch (e) {
       console.warn('Error loading custom tracks from localStorage:', e);
     }
+
+    // Unlocking on first interaction
+    const unlock = () => {
+      if (this.musicEnabled && this.currentTrack && this.sound && !this.sound.playing()) {
+        try {
+          if (Howler && Howler.ctx && Howler.ctx.state === 'suspended') {
+            Howler.ctx.resume().then(() => {
+              if (this.sound && !this.sound.playing()) {
+                this.sound.play();
+              }
+            }).catch(err => console.warn('Context resume failed:', err));
+          } else {
+            this.sound.play();
+          }
+        } catch (e) {
+          console.warn('Autoplay unlock error:', e);
+        }
+      }
+      window.removeEventListener('click', unlock);
+      window.removeEventListener('touchstart', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+
+    window.addEventListener('click', unlock);
+    window.addEventListener('touchstart', unlock);
+    window.addEventListener('keydown', unlock);
   }
 
   isMusicEnabled() {
@@ -120,6 +146,28 @@ class MusicManager {
         },
         onplayerror: (id, err) => {
           console.error(`Error playing music track: ${trackType}`, err);
+          
+          const playOnGesture = () => {
+            if (this.sound && this.currentTrack === trackType && !this.sound.playing() && this.musicEnabled) {
+              try {
+                if (Howler && Howler.ctx && Howler.ctx.state === 'suspended') {
+                  Howler.ctx.resume().then(() => {
+                    if (this.sound && !this.sound.playing()) {
+                      this.sound.play();
+                    }
+                  }).catch(e => console.warn(e));
+                } else {
+                  this.sound.play();
+                }
+              } catch (e) {
+                console.warn(e);
+              }
+            }
+            window.removeEventListener('click', playOnGesture);
+            window.removeEventListener('touchstart', playOnGesture);
+          };
+          window.addEventListener('click', playOnGesture);
+          window.addEventListener('touchstart', playOnGesture);
         }
       });
 

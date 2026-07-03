@@ -3,9 +3,61 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>Viborita</title>
-    <script type="module" crossorigin src="/assets/index-BmIwt8p_.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-Du8PLRt7.css">
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/png" href="/icon-512.png" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <meta name="theme-color" content="#3B82F6" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <script async src="https://connect.facebook.net/en_US/fbinstant.7.1.js"></script>
+    <script>
+      // Function to initialize after script loads or if it fails
+      function initFB() {
+        if (typeof FBInstant !== 'undefined') {
+          FBInstant.initializeAsync()
+            .then(function() {
+              FBInstant.setLoadingProgress(100); 
+              return FBInstant.startGameAsync();
+            })
+            .then(function() {
+              window.FB_GAME_READY = true;
+              window.dispatchEvent(new Event('fb-instant-ready'));
+            })
+            .catch(function(error) {
+              console.error("Error iniciando el SDK:", error);
+              window.FB_GAME_READY = true;
+              window.dispatchEvent(new Event('fb-instant-ready'));
+            });
+        } else {
+          // If script didn't load or was blocked
+          window.FB_GAME_READY = true;
+          window.dispatchEvent(new Event('fb-instant-ready'));
+        }
+      }
+
+      // Check every 500ms if FBInstant is available (fallback)
+      var fbCheckInterval = setInterval(function() {
+        if (typeof FBInstant !== 'undefined') {
+          clearInterval(fbCheckInterval);
+          initFB();
+        }
+      }, 500);
+
+      // Also set a hard timeout for game entry
+      setTimeout(function() {
+        if (!window.FB_GAME_READY) {
+          clearInterval(fbCheckInterval);
+          window.FB_GAME_READY = true;
+          window.dispatchEvent(new Event('fb-instant-ready'));
+        }
+      }, 3000);
+    </script>
+    <script type="module" crossorigin src="/assets/index-BhZHt-w_.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-xEqoRGIw.css">
   </head>
   <body>
     <div id="root"></div>

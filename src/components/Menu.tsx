@@ -4,7 +4,7 @@ import { APP_VERSION, ALL_SKINS, compareVersions } from '../constants';
 import { ALL_ABILITIES } from '../abilities';
 import { motion, AnimatePresence } from 'motion/react';
 import { supabase } from '../lib/supabase';
-import { Coins, Play, ShoppingBag, User as UserIcon, Trophy, ArrowLeft, Plus, Copy, ExternalLink, Check, X, Zap, Users, ShieldCheck, History, LogOut, Trash2, CreditCard, UserPlus, Palette, Search, Send, MessageSquare, Heart, Loader2, Award, Moon, Target, Skull, Sparkles, Settings, Volume2, VolumeX, Gamepad2, UserMinus, Instagram, Youtube, Facebook, Twitch, Calendar, Timer, Download, Lock } from 'lucide-react';
+import { Coins, Play, ShoppingBag, User as UserIcon, Trophy, ArrowLeft, Plus, Copy, ExternalLink, Check, X, Zap, Users, ShieldCheck, History, LogOut, Trash2, CreditCard, UserPlus, Palette, Search, Send, MessageSquare, Heart, Loader2, Award, Moon, Target, Skull, Sparkles, Settings, Volume2, VolumeX, Gamepad2, UserMinus, Instagram, Youtube, Facebook, Twitch, Calendar, Timer, Download, Lock, HelpCircle } from 'lucide-react';
 import { GoldPointIcon, MonedasIcon } from './Icons';
 import AdminPanel from './AdminPanel';
 import { ARENA_ITEMS, SUCCESS_RATES, ArenaItem } from '../items';
@@ -17,6 +17,7 @@ import { GoogleGenAI } from "@google/genai";
 import { io, Socket } from 'socket.io-client';
 import ExpandedFriendProfile from './Social/ExpandedFriendProfile';
 import ProfileCustomization from './Social/ProfileCustomization';
+import WagerTutorialModal from './WagerTutorialModal';
 
 // Initialize AI
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -82,6 +83,7 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
   const [isGeminiLoading, setIsGeminiLoading] = useState(false);
   const [purchaseConfirmation, setPurchaseConfirmation] = useState<{ skin: Skin; price: number } | null>(null);
   const [showDailyRewards, setShowDailyRewards] = useState(false);
+  const [showWagerTutorial, setShowWagerTutorial] = useState(false);
   const [selectedDayForPreview, setSelectedDayForPreview] = useState<number | null>(null);
   const [showProfileCustomization, setShowProfileCustomization] = useState(false);
   const [showFriendProfile, setShowFriendProfile] = useState<Friendship | null>(null);
@@ -344,6 +346,15 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
       setShowUsernameModal(true);
     }
   }, [user.usernameSet]);
+
+  useEffect(() => {
+    if (showWagerModal) {
+      const hasSeen = localStorage.getItem('viborita_wager_tutorial_seen');
+      if (!hasSeen) {
+        setShowWagerTutorial(true);
+      }
+    }
+  }, [showWagerModal]);
 
   // Gift fragments for tester
   useEffect(() => {
@@ -3224,8 +3235,17 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
             className="w-full max-w-lg rounded-3xl border border-white/10 bg-gray-900 p-8 shadow-2xl"
           >
             <div className="mb-6 flex items-center justify-between">
-              <h3 className="text-2xl font-black italic tracking-tighter text-blue-400 uppercase">Seleccionar Apuesta</h3>
-              <button onClick={() => setShowWagerModal(false)} className="text-gray-500 hover:text-white">
+              <div className="flex items-center gap-2">
+                <h3 className="text-2xl font-black italic tracking-tighter text-blue-400 uppercase">Seleccionar Apuesta</h3>
+                <button 
+                  onClick={() => setShowWagerTutorial(true)}
+                  className="rounded-full bg-blue-500/10 p-1.5 text-blue-400 hover:bg-blue-500/20 transition-all flex items-center justify-center cursor-pointer"
+                  title="Ver tutorial interactivo de apuestas"
+                >
+                  <HelpCircle size={16} />
+                </button>
+              </div>
+              <button onClick={() => setShowWagerModal(false)} className="text-gray-500 hover:text-white cursor-pointer">
                 <X size={24} />
               </button>
             </div>
@@ -4579,6 +4599,12 @@ export default function Menu({ user, onStartGame, onStartTraining, onStartWager,
                 </button>
               </motion.div>
             </div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {showWagerTutorial && (
+            <WagerTutorialModal onClose={() => setShowWagerTutorial(false)} />
           )}
         </AnimatePresence>
       </div>
